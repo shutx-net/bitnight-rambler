@@ -1,0 +1,20 @@
+{
+  "id": "cat",
+  "name": "Cat",
+  "description": "A little tabby that strolls along the bottom of your terminal.",
+  "width": 16,
+  "height": 12,
+  "facing": "right",
+  "palette": {
+    "k": "#3b2730",
+    "o": "#f2a65a",
+    "d": "#c8743a",
+    "w": "#ffe9c7",
+    "p": "#f497a9"
+  },
+  "animations": {
+    "idle": { "frames": ["idle-0", "idle-0", "idle-0", "idle-1", "idle-0", "idle-0", "idle-2", "idle-2"], "frame_ms": 400 },
+    "walk": { "frames": ["walk-0", "walk-1", "walk-2", "walk-3"], "frame_ms": 140 }
+  },
+  "motion": { "speed": 9 }
+}

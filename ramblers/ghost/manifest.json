@@ -1,0 +1,19 @@
+{
+  "id": "ghost",
+  "name": "Ghost",
+  "description": "A shy little ghost that drifts back and forth, hem fluttering.",
+  "width": 14,
+  "height": 14,
+  "facing": "right",
+  "palette": {
+    "k": "#3c3157",
+    "w": "#f4f1ff",
+    "s": "#c9c1ea",
+    "c": "#ff9db5"
+  },
+  "animations": {
+    "idle": { "frames": ["float-0", "float-1", "float-2", "float-3", "float-0", "float-1", "blink", "float-1"], "frame_ms": 220 },
+    "walk": { "frames": ["float-0", "float-1", "float-2", "float-3"], "frame_ms": 180 }
+  },
+  "motion": { "speed": 6 }
+}
