@@ -1,0 +1,19 @@
+{
+  "id": "slime",
+  "name": "Slime",
+  "description": "A cheerful blob that hops along without a single leg to its name.",
+  "width": 14,
+  "height": 12,
+  "facing": "right",
+  "palette": {
+    "k": "#1d3b4f",
+    "b": "#4fb3e8",
+    "s": "#2f86c2",
+    "h": "#d8f3ff"
+  },
+  "animations": {
+    "idle": { "frames": ["idle-0", "idle-0", "hop-0", "idle-0", "idle-0", "blink"], "frame_ms": 300 },
+    "walk": { "frames": ["hop-0", "hop-1", "hop-2", "hop-2", "hop-3"], "frame_ms": 110 }
+  },
+  "motion": { "speed": 7 }
+}
