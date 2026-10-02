@@ -26,6 +26,19 @@ zig build -Doptimize=ReleaseSmall  # a standalone binary of under 300 KB
 Tested on Linux. It also builds for macOS, but has not been tried there
 yet. Windows is not supported yet.
 
+### With Nix
+
+The flake provides Zig 0.16.0 and ZLS for x86_64-linux, aarch64-linux
+and aarch64-darwin:
+
+```sh
+nix develop          # a shell with zig and zls
+direnv allow         # or let direnv load it whenever you cd in (.envrc)
+nix build            # ./result/bin/rambit, after running the tests
+nix run . -- cat
+nix flake check
+```
+
 ## Usage
 
 ```sh
