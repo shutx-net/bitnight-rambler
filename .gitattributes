@@ -1,0 +1,3 @@
+# Check out text files with LF line endings, whatever core.autocrlf says.
+# bash reads a CR as part of a command, which breaks .envrc.
+* text=auto eol=lf
