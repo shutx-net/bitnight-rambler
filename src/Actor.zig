@@ -38,6 +38,8 @@ const State = union(enum) {
         target: f32,
         /// At the run speed, with the `run` animation.
         running: bool = false,
+        /// Time since takeoff while jumping; null on the ground.
+        airborne_us: ?u64 = null,
     },
     resting: struct { remaining_us: u64 },
     sleeping: struct { remaining_us: u64 },
@@ -46,6 +48,8 @@ const State = union(enum) {
 pub const Frame = struct {
     sprite: Sprite,
     x: i32,
+    /// How far above the ground to draw the sprite, in pixels.
+    lift: u16,
     /// Whether the sprite must be flipped to face the direction of travel.
     mirror: bool,
 };
@@ -59,6 +63,11 @@ const run_chance = 0.25;
 const sleep_chance = 0.25;
 const min_sleep_us = 6000 * std.time.us_per_ms;
 const max_sleep_us = 12000 * std.time.us_per_ms;
+/// A rambler that can jump does so about this often while on the move.
+const mean_jump_interval_us = 8000 * std.time.us_per_ms;
+/// In pixels per second squared. Higher jumps take longer: one of 6 pixels
+/// lasts about 0.63 s.
+const gravity = 120;
 
 pub fn init(rambler: *const Rambler, mode: Mode, seed: u64, field_width: u16) Actor {
     var a: Actor = .{
@@ -84,7 +93,13 @@ pub fn init(rambler: *const Rambler, mode: Mode, seed: u64, field_width: u16) Ac
 pub fn update(a: *Actor, dt_us: u64, field_width: u16) void {
     a.elapsed_us += dt_us;
     switch (a.state) {
-        .walking => |walking| {
+        .walking => |*walking| {
+            if (walking.airborne_us) |*airborne_us| {
+                airborne_us.* += dt_us;
+                if (airborne_us.* >= a.airtimeUs()) walking.airborne_us = null;
+            } else if (a.takesOff(walking.target, walking.running, dt_us)) {
+                walking.airborne_us = 0;
+            }
             const speed = if (walking.running) a.rambler.run_speed else a.rambler.speed;
             const step = speed * @as(f32, @floatFromInt(dt_us)) / std.time.us_per_s;
             const distance = walking.target - a.x;
@@ -93,7 +108,8 @@ pub fn update(a: *Actor, dt_us: u64, field_width: u16) void {
                 return;
             }
             a.x = walking.target;
-            a.arrive(field_width);
+            // Land first if the target was reached in mid-jump.
+            if (walking.airborne_us == null) a.arrive(field_width);
         },
         .resting => |resting| {
             if (resting.remaining_us > dt_us) {
@@ -134,15 +150,23 @@ pub fn resize(a: *Actor, field_width: u16) void {
 }
 
 pub fn frame(a: *const Actor) Frame {
-    const anim = a.rambler.animation(switch (a.state) {
-        .walking => |walking| if (walking.running) .run else .walk,
+    const kind: Rambler.Animation.Kind = switch (a.state) {
+        .walking => |walking| if (walking.airborne_us != null) .jump else if (walking.running) .run else .walk,
         .resting => .idle,
         .sleeping => .sleep,
-    });
-    const index = (a.elapsed_us / (@as(u64, anim.frame_ms) * std.time.us_per_ms)) % anim.frames.len;
+    };
+    const anim = a.rambler.animation(kind);
+    const frame_us = @as(u64, anim.frame_ms) * std.time.us_per_ms;
+    const index = switch (kind) {
+        // A jump starts from its first frame at every takeoff, and holds its
+        // last one until landing.
+        .jump => @min(a.state.walking.airborne_us.? / frame_us, anim.frames.len - 1),
+        else => (a.elapsed_us / frame_us) % anim.frames.len,
+    };
     return .{
         .sprite = anim.frames[index],
         .x = @intFromFloat(@floor(a.x)),
+        .lift = a.lift(),
         .mirror = a.direction != a.rambler.facing,
     };
 }
@@ -187,9 +211,45 @@ fn setOff(a: *Actor, field_width: u16) void {
 
 fn walkTo(a: *Actor, target: f32, running: bool) void {
     if (target != a.x) a.direction = if (target > a.x) .right else .left;
-    // Walking on at the same pace keeps the animation going.
-    if (a.state != .walking or a.state.walking.running != running) a.elapsed_us = 0;
-    a.state = .{ .walking = .{ .target = target, .running = running } };
+    var airborne_us: ?u64 = null;
+    switch (a.state) {
+        // Keep the animation going, and any jump in progress.
+        .walking => |walking| {
+            if (walking.running != running) a.elapsed_us = 0;
+            airborne_us = walking.airborne_us;
+        },
+        else => a.elapsed_us = 0,
+    }
+    a.state = .{ .walking = .{ .target = target, .running = running, .airborne_us = airborne_us } };
+}
+
+/// Whether to jump now: while roaming, now and then, and only with room to
+/// land before the target.
+fn takesOff(a: *Actor, target: f32, running: bool, dt_us: u64) bool {
+    if (a.mode != .roam or !a.can(.jump)) return false;
+    const speed = if (running) a.rambler.run_speed else a.rambler.speed;
+    const reach = speed * @as(f32, @floatFromInt(a.airtimeUs())) / std.time.us_per_s;
+    if (@abs(target - a.x) < reach) return false;
+    return a.prng.random().uintLessThan(u64, mean_jump_interval_us) < dt_us;
+}
+
+/// How long a jump lasts: as long as something thrown `jump_height` pixels
+/// up takes to fall back down.
+fn airtimeUs(a: *const Actor) u64 {
+    const height: f32 = @floatFromInt(a.rambler.jump_height);
+    return @intFromFloat(2 * @sqrt(2 * height / gravity) * std.time.us_per_s);
+}
+
+/// The height of a jump at this moment: a parabola that peaks at the jump
+/// height halfway through.
+fn lift(a: *const Actor) u16 {
+    const airborne_us = switch (a.state) {
+        .walking => |walking| walking.airborne_us orelse return 0,
+        else => return 0,
+    };
+    const t = @as(f32, @floatFromInt(airborne_us)) / @as(f32, @floatFromInt(a.airtimeUs()));
+    const height: f32 = @floatFromInt(a.rambler.jump_height);
+    return @intFromFloat(@round(4 * height * t * (1 - t)));
 }
 
 /// Picks a spot on screen, preferably a good stroll away from the current one.
@@ -240,6 +300,10 @@ fn testRambler(with_idle: bool) Rambler {
 /// them apart.
 const run_frames = [_]Sprite{.{ .width = 4, .height = 1, .pixels = "k.k." }};
 const sleep_frames = [_]Sprite{.{ .width = 4, .height = 1, .pixels = "kkkk" }};
+const jump_frames = [_]Sprite{
+    .{ .width = 4, .height = 1, .pixels = "k..k" },
+    .{ .width = 4, .height = 1, .pixels = ".kk." },
+};
 
 /// `testRambler`, plus the animations for `kinds` (some of run, sleep and
 /// jump).
@@ -249,7 +313,8 @@ fn testRamblerWith(with_idle: bool, kinds: []const Rambler.Animation.Kind) Rambl
         const frames: []const Sprite = switch (kind) {
             .run => &run_frames,
             .sleep => &sleep_frames,
-            .idle, .walk, .jump => unreachable,
+            .jump => &jump_frames,
+            .idle, .walk => unreachable,
         };
         r.animations.set(kind, .{ .frames = frames, .frame_ms = 100 });
     }
@@ -259,7 +324,7 @@ fn testRamblerWith(with_idle: bool, kinds: []const Rambler.Animation.Kind) Rambl
 const tick_us = 33_333;
 
 test "the same seed produces the same run" {
-    for ([_]Rambler{ testRambler(true), testRamblerWith(true, &.{ .run, .sleep }) }) |rambler| {
+    for ([_]Rambler{ testRambler(true), testRamblerWith(true, &.{ .run, .sleep, .jump }) }) |rambler| {
         var a: Actor = .init(&rambler, .roam, 42, 60);
         var b: Actor = .init(&rambler, .roam, 42, 60);
         for (0..3000) |_| {
@@ -272,7 +337,7 @@ test "the same seed produces the same run" {
 }
 
 test "roaming stays on screen once entered" {
-    for ([_]Rambler{ testRambler(true), testRamblerWith(true, &.{ .run, .sleep }) }) |rambler| {
+    for ([_]Rambler{ testRambler(true), testRamblerWith(true, &.{ .run, .sleep, .jump }) }) |rambler| {
         var a: Actor = .init(&rambler, .roam, 7, 60);
         // Walk in first.
         while (a.state == .walking) a.update(tick_us, 60);
@@ -334,6 +399,7 @@ test "ramblers without run, sleep or jump move as they always have" {
             }
             a.update(tick_us, cols);
             const f = a.frame();
+            try testing.expectEqual(0, f.lift);
             hasher.update(std.mem.asBytes(&a.x));
             hasher.update(f.sprite.pixels);
             hasher.update(&.{ @intFromBool(f.mirror), @intFromBool(a.done) });
@@ -344,16 +410,22 @@ test "ramblers without run, sleep or jump move as they always have" {
     }
 }
 
-test "ramblers run and sleep with the animations for it" {
-    const rambler = testRamblerWith(true, &.{ .run, .sleep });
+test "ramblers run, sleep and jump with the animations for it" {
+    const rambler = testRamblerWith(true, &.{ .run, .sleep, .jump });
     var a: Actor = .init(&rambler, .roam, 1, 60);
     var ran = false;
     var slept = false;
+    var jumped = false;
     for (0..20_000) |_| {
         a.update(tick_us, 60);
         const pixels = a.frame().sprite.pixels;
         switch (a.state) {
-            .walking => |walking| if (walking.running) {
+            .walking => |walking| if (walking.airborne_us) |airborne_us| {
+                jumped = true;
+                // Whether running or not.
+                const index = @min(airborne_us / (100 * std.time.us_per_ms), jump_frames.len - 1);
+                try testing.expectEqualStrings(jump_frames[index].pixels, pixels);
+            } else if (walking.running) {
                 ran = true;
                 try testing.expectEqualStrings(run_frames[0].pixels, pixels);
             },
@@ -364,7 +436,7 @@ test "ramblers run and sleep with the animations for it" {
             .resting => {},
         }
     }
-    try testing.expect(ran and slept);
+    try testing.expect(ran and slept and jumped);
 }
 
 test "running moves at the run speed" {
@@ -385,6 +457,86 @@ test "running moves at the run speed" {
     try testing.expect(runs > 0);
 }
 
+test "a jump rises to the jump height and lands" {
+    const rambler = testRamblerWith(true, &.{.jump});
+    var a: Actor = .init(&rambler, .roam, 1, 60);
+    var jumps: usize = 0;
+    var highest: u16 = 0;
+    var was_airborne = false;
+    for (0..20_000) |_| {
+        a.update(tick_us, 60);
+        const f = a.frame();
+        try testing.expect(f.lift <= rambler.jump_height);
+        highest = @max(highest, f.lift);
+        const airborne_us: ?u64 = switch (a.state) {
+            .walking => |walking| walking.airborne_us,
+            .resting, .sleeping => null,
+        };
+        if (airborne_us) |us| {
+            // Played once from takeoff, then held.
+            const index = @min(us / (100 * std.time.us_per_ms), jump_frames.len - 1);
+            try testing.expectEqualStrings(jump_frames[index].pixels, f.sprite.pixels);
+            if (!was_airborne) jumps += 1;
+        } else {
+            try testing.expectEqual(0, f.lift);
+        }
+        was_airborne = airborne_us != null;
+    }
+    try testing.expect(jumps > 0);
+    try testing.expectEqual(rambler.jump_height, highest);
+}
+
+test "a jump only starts with room to land before the target" {
+    const rambler = testRamblerWith(true, &.{ .run, .jump });
+    var walking_takeoffs: usize = 0;
+    var running_takeoffs: usize = 0;
+    for (0..10) |seed| {
+        var a: Actor = .init(&rambler, .roam, seed, 60);
+        for (0..20_000) |_| {
+            const before = a;
+            a.update(tick_us, 60);
+            // Only look at the ticks that take off.
+            if (before.state != .walking or before.state.walking.airborne_us != null) continue;
+            if (a.state != .walking or a.state.walking.airborne_us == null) continue;
+            const walking = before.state.walking;
+            const speed = if (walking.running) rambler.run_speed else rambler.speed;
+            // The distance a jump covers at this pace.
+            const reach = speed * @as(f32, @floatFromInt(a.airtimeUs())) / std.time.us_per_s;
+            try testing.expect(@abs(walking.target - before.x) >= reach);
+            if (walking.running) running_takeoffs += 1 else walking_takeoffs += 1;
+        }
+    }
+    // A run needs more room, so check both.
+    try testing.expect(walking_takeoffs > 0 and running_takeoffs > 0);
+}
+
+test "a jump that reaches the target lands before arriving" {
+    const rambler = testRamblerWith(true, &.{.jump});
+    var a: Actor = .init(&rambler, .roam, 1, 60);
+    // Just taken off, a pixel short of the target.
+    a.x = 20;
+    a.state = .{ .walking = .{ .target = 21, .airborne_us = 0 } };
+    // `b` takes the same jump with its target far away.
+    var b = a;
+    b.state.walking.target = 50;
+    var ticks: usize = 0;
+    while (true) : (ticks += 1) {
+        a.update(tick_us, 60);
+        b.update(tick_us, 60);
+        if (b.state.walking.airborne_us == null) break;
+        // No further than the target, and in the air like `b`.
+        try testing.expect(a.state == .walking and a.state.walking.airborne_us != null);
+        try testing.expect(a.x <= 21);
+        try testing.expectEqual(b.frame().lift, a.frame().lift);
+        try testing.expect(ticks < 100);
+    }
+    try testing.expectEqual(21, a.x);
+    // Landed along with `b`, and only then arrived: resting, or off to
+    // somewhere else.
+    try testing.expectEqual(0, a.frame().lift);
+    try testing.expect(a.state != .walking or a.state.walking.target != 21);
+}
+
 test "ramblers without an idle animation only stop to sleep" {
     const rambler = testRamblerWith(false, &.{.sleep});
     var a: Actor = .init(&rambler, .roam, 1, 60);
@@ -398,13 +550,15 @@ test "ramblers without an idle animation only stop to sleep" {
 }
 
 test "once only walks, whatever the rambler can do" {
-    const rambler = testRamblerWith(false, &.{ .run, .sleep });
+    const rambler = testRamblerWith(false, &.{ .run, .sleep, .jump });
     for (0..10) |seed| {
         var a: Actor = .init(&rambler, .once, seed, 40);
         var ticks: usize = 0;
         while (!a.done) : (ticks += 1) {
             a.update(tick_us, 40);
             try testing.expect(!a.state.walking.running);
+            try testing.expect(a.state.walking.airborne_us == null);
+            try testing.expectEqual(0, a.frame().lift);
             try testing.expect(ticks < 1000);
         }
         // 44 pixels at the walking speed of 10 pixels per second.
@@ -412,8 +566,8 @@ test "once only walks, whatever the rambler can do" {
     }
 }
 
-test "a resize wakes a rambler left off screen" {
-    const rambler = testRamblerWith(true, &.{.sleep});
+test "a resize wakes a rambler left off screen, and lets a jump finish" {
+    const rambler = testRamblerWith(true, &.{ .sleep, .jump });
     var a: Actor = .init(&rambler, .roam, 3, 90);
     // Fall asleep too far right to fit on a 30-column screen.
     var ticks: usize = 0;
@@ -423,4 +577,18 @@ test "a resize wakes a rambler left off screen" {
     }
     a.resize(30);
     try testing.expect(a.state == .walking);
+    // Narrow the screen further in mid-air: the jump goes on, and lands.
+    ticks = 0;
+    while (!(a.state == .walking and a.state.walking.airborne_us != null and a.frame().lift > 0)) : (ticks += 1) {
+        a.update(tick_us, 30);
+        try testing.expect(ticks < 20_000);
+    }
+    a.resize(10);
+    try testing.expect(a.state.walking.airborne_us != null);
+    ticks = 0;
+    while (a.state == .walking and a.state.walking.airborne_us != null) : (ticks += 1) {
+        a.update(tick_us, 10);
+        try testing.expect(ticks < 100);
+    }
+    try testing.expectEqual(0, a.frame().lift);
 }
