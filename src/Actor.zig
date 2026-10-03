@@ -155,7 +155,7 @@ pub fn frame(a: *const Actor) Frame {
         .resting => .idle,
         .sleeping => .sleep,
     };
-    const anim = a.rambler.animation(kind);
+    const anim = a.rambler.animation(.floor, kind);
     const frame_us = @as(u64, anim.frame_ms) * std.time.us_per_ms;
     const index = switch (kind) {
         // A jump starts from its first frame at every takeoff, and holds its
@@ -173,7 +173,7 @@ pub fn frame(a: *const Actor) Frame {
 
 /// Whether the rambler has the animation for `kind`, and so may do it.
 fn can(a: *const Actor, kind: Rambler.Animation.Kind) bool {
-    return a.rambler.animations.get(kind) != null;
+    return a.rambler.animations.get(.floor).get(kind) != null;
 }
 
 fn arrive(a: *Actor, field_width: u16) void {
@@ -278,7 +278,7 @@ const test_frames = [_]Sprite{
 };
 
 fn testRambler(with_idle: bool) Rambler {
-    var animations: std.EnumArray(Rambler.Animation.Kind, ?Rambler.Animation) = .initFill(null);
+    var animations: Rambler.Animations = .initFill(null);
     animations.set(.walk, .{ .frames = &test_frames, .frame_ms = 100 });
     if (with_idle) animations.set(.idle, .{ .frames = test_frames[0..1], .frame_ms = 500 });
     return .{
@@ -289,7 +289,8 @@ fn testRambler(with_idle: bool) Rambler {
         .height = 1,
         .facing = .right,
         .palette = .{},
-        .animations = animations,
+        .animations = .init(.{ .floor = animations, .wall = .initFill(null), .ceiling = .initFill(null) }),
+        .edges = .initOne(.bottom),
         .speed = 10,
         .run_speed = 25,
         .jump_height = 3,
@@ -316,7 +317,7 @@ fn testRamblerWith(with_idle: bool, kinds: []const Rambler.Animation.Kind) Rambl
             .jump => &jump_frames,
             .idle, .walk => unreachable,
         };
-        r.animations.set(kind, .{ .frames = frames, .frame_ms = 100 });
+        r.animations.getPtr(.floor).set(kind, .{ .frames = frames, .frame_ms = 100 });
     }
     return r;
 }

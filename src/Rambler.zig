@@ -41,7 +41,10 @@ height: u16,
 /// when the rambler moves the other way.
 facing: Facing,
 palette: color.Palette,
-animations: std.EnumArray(Animation.Kind, ?Animation),
+/// One set per surface; only the floor's is required.
+animations: std.EnumArray(Surface, Animations),
+/// The edges the rambler walks along: always the bottom.
+edges: std.EnumSet(Edge),
 /// Movement speed in pixels (that is, terminal columns) per second.
 speed: f32,
 /// Speed while running, in pixels per second; only used with a `run`
@@ -52,20 +55,50 @@ jump_height: u16,
 
 pub const Facing = enum { left, right };
 
+/// An edge of the terminal that a rambler can walk along. Listed in the
+/// order that previews and messages use.
+pub const Edge = enum {
+    bottom,
+    left,
+    right,
+    top,
+
+    /// The surface the rambler walks on along this edge.
+    pub fn surface(e: Edge) Surface {
+        return switch (e) {
+            .bottom => .floor,
+            .left, .right => .wall,
+            .top => .ceiling,
+        };
+    }
+};
+
+/// What a rambler walks on, each with its own set of animations: the
+/// floor along the bottom edge, a wall along either side, the ceiling
+/// along the top.
+pub const Surface = enum { floor, wall, ceiling };
+
+/// The animations for one surface, by kind; those the rambler lacks are
+/// null.
+pub const Animations = std.EnumArray(Animation.Kind, ?Animation);
+
 pub const Animation = struct {
     frames: []const Sprite,
     frame_ms: u32,
 
-    /// At least one of `idle` and `walk` is required. The actor only runs,
-    /// sleeps or jumps if the rambler has the animation for it.
+    /// At least one of `idle` and `walk` is required on every surface the
+    /// rambler walks on. The actor only runs, sleeps or jumps if the
+    /// rambler has the animation for it.
     pub const Kind = enum { idle, walk, run, sleep, jump };
 };
 
-/// Returns the animation for `kind`, falling back to `walk` or `idle`.
-/// Validation guarantees that at least one of those two exists.
-pub fn animation(r: *const Rambler, kind: Animation.Kind) Animation {
-    if (r.animations.get(kind)) |a| return a;
-    return r.animations.get(.walk) orelse r.animations.get(.idle).?;
+/// Returns the animation for `kind` on `surface`, falling back to that
+/// surface's `walk` or `idle`. Validation guarantees that at least one of
+/// those two exists on every surface one of the rambler's edges uses.
+pub fn animation(r: *const Rambler, surface: Surface, kind: Animation.Kind) Animation {
+    const set = r.animations.get(surface);
+    if (set.get(kind)) |a| return a;
+    return set.get(.walk) orelse set.get(.idle).?;
 }
 
 pub const limits = struct {
@@ -145,7 +178,8 @@ pub fn load(arena: Allocator, source: Source, diag: *Diagnostics) LoadError!Ramb
     } else null;
 
     var sprites: SpriteCache = .{ .source = source, .geometry = geometry, .diag = diag };
-    const animations = try parseAnimations(root, &sprites);
+    var animations: std.EnumArray(Surface, Animations) = .initFill(.initFill(null));
+    animations.set(.floor, try parseAnimations(root, &sprites));
 
     if (geometry != null) {
         for (try source.fileNames(arena)) |file_name| {
@@ -166,6 +200,7 @@ pub fn load(arena: Allocator, source: Source, diag: *Diagnostics) LoadError!Ramb
         .facing = facing,
         .palette = palette.?,
         .animations = animations,
+        .edges = .initOne(.bottom),
         .speed = @floatCast(speed),
         .run_speed = @floatCast(run_speed),
         .jump_height = @intCast(jump_height),
@@ -239,8 +274,8 @@ fn parsePalette(root: Fields) Allocator.Error!?color.Palette {
     return if (ok) palette else null;
 }
 
-fn parseAnimations(root: Fields, sprites: *SpriteCache) Allocator.Error!std.EnumArray(Animation.Kind, ?Animation) {
-    var animations: std.EnumArray(Animation.Kind, ?Animation) = .initFill(null);
+fn parseAnimations(root: Fields, sprites: *SpriteCache) Allocator.Error!Animations {
+    var animations: Animations = .initFill(null);
     const fields = try root.object("animations", true) orelse return animations;
 
     for (fields.members.keys()) |key| {
@@ -482,8 +517,10 @@ test "load a minimal rambler" {
     try testing.expectEqual(@as(f32, 2 * default_speed), r.run_speed);
     try testing.expectEqual(1, r.jump_height);
     // `idle` falls back to `walk`.
-    try testing.expectEqual(3, r.animation(.idle).frames.len);
-    try testing.expectEqual(default_frame_ms, r.animation(.walk).frame_ms);
+    try testing.expectEqual(3, r.animation(.floor, .idle).frames.len);
+    try testing.expectEqual(default_frame_ms, r.animation(.floor, .walk).frame_ms);
+    try testing.expectEqual(1, r.edges.count());
+    try testing.expect(r.edges.contains(.bottom));
 }
 
 test "load reports every problem" {

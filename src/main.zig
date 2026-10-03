@@ -340,8 +340,9 @@ fn lessThan(_: void, a: []const u8, b: []const u8) bool {
 fn preview(arena: Allocator, io: Io, r: *const Rambler, mode: color.Mode, stdout: *Writer) !void {
     try stdout.print("{s} ({s}){s}{s}\n", .{ r.name, r.id, if (r.description.len != 0) ": " else "", r.description });
     try stdout.print("{d}x{d} pixels, facing {t}, {d} px/s", .{ r.width, r.height, r.facing, r.speed });
-    if (r.animations.get(.run) != null) try stdout.print(", running {d} px/s", .{r.run_speed});
-    if (r.animations.get(.jump) != null) try stdout.print(", jumping {d} px", .{r.jump_height});
+    const floor = r.animations.get(.floor);
+    if (floor.get(.run) != null) try stdout.print(", running {d} px/s", .{r.run_speed});
+    if (floor.get(.jump) != null) try stdout.print(", jumping {d} px", .{r.jump_height});
     try stdout.writeByte('\n');
 
     const gap = 2;
@@ -351,7 +352,7 @@ fn preview(arena: Allocator, io: Io, r: *const Rambler, mode: color.Mode, stdout
     const height = r.height + r.height % 2;
 
     for (std.enums.values(Rambler.Animation.Kind)) |kind| {
-        const anim = r.animations.get(kind) orelse continue;
+        const anim = floor.get(kind) orelse continue;
         try stdout.print("\n{t}: {d} frame{s}, {d} ms each\n", .{ kind, anim.frames.len, if (anim.frames.len == 1) "" else "s", anim.frame_ms });
         var frames = std.mem.window(Sprite, anim.frames, per_line, per_line);
         while (frames.next()) |line| {
