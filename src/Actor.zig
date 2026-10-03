@@ -181,6 +181,8 @@ fn testRambler(with_idle: bool) Rambler {
         .palette = .{},
         .animations = animations,
         .speed = 10,
+        .run_speed = 25,
+        .jump_height = 3,
     };
 }
 

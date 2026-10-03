@@ -44,6 +44,11 @@ palette: color.Palette,
 animations: std.EnumArray(Animation.Kind, ?Animation),
 /// Movement speed in pixels (that is, terminal columns) per second.
 speed: f32,
+/// Speed while running, in pixels per second; only used with a `run`
+/// animation.
+run_speed: f32,
+/// How high a jump goes, in pixels; only used with a `jump` animation.
+jump_height: u16,
 
 pub const Facing = enum { left, right };
 
@@ -70,6 +75,7 @@ pub const limits = struct {
     pub const max_frame_ms = 10_000;
     pub const min_speed = 1;
     pub const max_speed = 64;
+    pub const max_jump_height = 64;
     pub const max_id_len = 32;
     pub const max_name_len = 64;
     pub const max_description_len = 200;
@@ -116,10 +122,18 @@ pub fn load(arena: Allocator, source: Source, diag: *Diagnostics) LoadError!Ramb
 
     const palette = try parsePalette(root);
 
+    // Running defaults to twice the speed, and jumping to half the height.
     var speed: f64 = default_speed;
+    var run_speed: f64 = 2 * default_speed;
+    var jump_height: i64 = @max(1, @divFloor(height orelse 0, 2));
     if (try root.object("motion", false)) |motion| {
-        try motion.rejectUnknown(&.{"speed"});
+        try motion.rejectUnknown(&.{ "speed", "run_speed", "jump_height" });
         speed = try motion.number("speed", default_speed, limits.min_speed, limits.max_speed) orelse default_speed;
+        const default_run_speed = @min(2 * speed, limits.max_speed);
+        run_speed = try motion.number("run_speed", default_run_speed, limits.min_speed, limits.max_speed) orelse default_run_speed;
+        jump_height = try motion.integer("jump_height", jump_height, 1, limits.max_jump_height) orelse jump_height;
+        try warnIfUnused(root, motion, "run_speed", .run);
+        try warnIfUnused(root, motion, "jump_height", .jump);
     }
 
     // Sprites can only be checked against a valid size, and their symbols
@@ -153,6 +167,8 @@ pub fn load(arena: Allocator, source: Source, diag: *Diagnostics) LoadError!Ramb
         .palette = palette.?,
         .animations = animations,
         .speed = @floatCast(speed),
+        .run_speed = @floatCast(run_speed),
+        .jump_height = @intCast(jump_height),
     };
 }
 
@@ -269,6 +285,16 @@ fn parseAnimations(root: Fields, sprites: *SpriteCache) Allocator.Error!std.Enum
     return animations;
 }
 
+/// Warns about a motion field that has no effect because there is no
+/// animation to go with it, which may be a typo in the animation's name.
+fn warnIfUnused(root: Fields, motion: Fields, key: []const u8, kind: Animation.Kind) Allocator.Error!void {
+    if (!motion.members.contains(key)) return;
+    if (root.members.get("animations")) |animations| {
+        if (animations == .object and animations.object.contains(@tagName(kind))) return;
+    }
+    try motion.warn(key, "not used without a \"{t}\" animation", .{kind});
+}
+
 fn isValidFrameName(name: []const u8) bool {
     if (name.len == 0 or name.len > 64) return false;
     for (name) |c| switch (c) {
@@ -337,6 +363,10 @@ const Fields = struct {
 
     fn failIndex(f: Fields, key: []const u8, index: usize, comptime fmt: []const u8, args: anytype) Allocator.Error!void {
         try f.diag.err(f.file, "{s}[{d}]: " ++ fmt, .{ try f.memberPath(key), index } ++ args);
+    }
+
+    fn warn(f: Fields, key: []const u8, comptime fmt: []const u8, args: anytype) Allocator.Error!void {
+        try f.diag.warn(f.file, "{s}: " ++ fmt, .{try f.memberPath(key)} ++ args);
     }
 
     fn rejectUnknown(f: Fields, comptime known: []const []const u8) Allocator.Error!void {
@@ -449,6 +479,8 @@ test "load a minimal rambler" {
     try testing.expectEqual(0, diag.items.items.len);
     try testing.expectEqual(.right, r.facing);
     try testing.expectEqual(@as(f32, default_speed), r.speed);
+    try testing.expectEqual(@as(f32, 2 * default_speed), r.run_speed);
+    try testing.expectEqual(1, r.jump_height);
     // `idle` falls back to `walk`.
     try testing.expectEqual(3, r.animation(.idle).frames.len);
     try testing.expectEqual(default_frame_ms, r.animation(.walk).frame_ms);
@@ -477,6 +509,119 @@ test "load reports every problem" {
         "animations.wlak: unknown animation (expected one of: idle, walk, run, sleep, jump)",
         "animations.idle.frames[0]: \"../a\": frame names may only contain letters, digits, '-' and '_'",
         "missing sprite file (referenced as frame \"missing\")",
+    };
+    try testing.expectEqual(expected.len, diag.items.items.len);
+    for (expected, diag.items.items) |message, item| try testing.expectEqualStrings(message, item.message);
+}
+
+test "load reads how fast a rambler runs and how high it jumps" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var diag: Diagnostics = .init(arena);
+
+    const r = try loadTest(arena, &.{
+        .{ .name = "manifest.json", .data =
+        \\{ "id": "test", "name": "Test", "width": 2, "height": 2,
+        \\  "palette": { "k": "#000000" },
+        \\  "animations": { "walk": { "frames": ["a"] }, "run": { "frames": ["a"] }, "jump": { "frames": ["a"] } },
+        \\  "motion": { "speed": 9, "run_speed": 20.5, "jump_height": 5 } }
+        },
+        .{ .name = "a.sprite", .data = "k.\n.k\n" },
+    }, &diag);
+    try testing.expectEqual(0, diag.items.items.len);
+    try testing.expectEqual(20.5, r.run_speed);
+    try testing.expectEqual(5, r.jump_height);
+
+    // By default, twice the speed (but no more than the maximum) and half
+    // the height.
+    const defaults = try loadTest(arena, &.{
+        .{ .name = "manifest.json", .data =
+        \\{ "id": "test", "name": "Test", "width": 2, "height": 13,
+        \\  "palette": { "k": "#000000" },
+        \\  "animations": { "walk": { "frames": ["a"] }, "run": { "frames": ["a"] }, "jump": { "frames": ["a"] } },
+        \\  "motion": { "speed": 40 } }
+        },
+        .{ .name = "a.sprite", .data = "k.\n" ** 13 },
+    }, &diag);
+    try testing.expectEqual(0, diag.items.items.len);
+    try testing.expectEqual(64, defaults.run_speed);
+    try testing.expectEqual(6, defaults.jump_height);
+
+    // A rambler one pixel tall still jumps: a jump of 0 pixels would take
+    // no time at all.
+    const flat = try loadTest(arena, &.{
+        .{ .name = "manifest.json", .data =
+        \\{ "id": "test", "name": "Test", "width": 2, "height": 1,
+        \\  "palette": { "k": "#000000" },
+        \\  "animations": { "walk": { "frames": ["a"] }, "jump": { "frames": ["a"] } } }
+        },
+        .{ .name = "a.sprite", .data = "k.\n" },
+    }, &diag);
+    try testing.expectEqual(0, diag.items.items.len);
+    try testing.expectEqual(1, flat.jump_height);
+}
+
+test "load warns about motion that no animation uses" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var diag: Diagnostics = .init(arena);
+
+    _ = try loadTest(arena, &.{
+        .{ .name = "manifest.json", .data =
+        \\{ "id": "test", "name": "Test", "width": 2, "height": 2,
+        \\  "palette": { "k": "#000000" },
+        \\  "animations": { "walk": { "frames": ["a"] } },
+        \\  "motion": { "run_speed": 20, "jump_height": 4 } }
+        },
+        .{ .name = "a.sprite", .data = "k.\n.k\n" },
+    }, &diag);
+    const expected = [_][]const u8{
+        "motion.run_speed: not used without a \"run\" animation",
+        "motion.jump_height: not used without a \"jump\" animation",
+    };
+    try testing.expectEqual(expected.len, diag.items.items.len);
+    for (expected, diag.items.items) |message, item| {
+        try testing.expectEqual(.warning, item.severity);
+        try testing.expectEqualStrings(message, item.message);
+    }
+
+    // A "run" animation with problems of its own is still there: its errors
+    // say what is wrong, without a warning that suggests it is missing.
+    diag = .init(arena);
+    try testing.expectError(error.InvalidRambler, loadTest(arena, &.{
+        .{ .name = "manifest.json", .data =
+        \\{ "id": "test", "name": "Test", "width": 2, "height": 2,
+        \\  "palette": { "k": "#000000" },
+        \\  "animations": { "walk": { "frames": ["a"] }, "run": { "frames": ["missing"] } },
+        \\  "motion": { "run_speed": 20 } }
+        },
+        .{ .name = "a.sprite", .data = "k.\n.k\n" },
+    }, &diag));
+    try testing.expectEqual(1, diag.errorCount());
+    try testing.expectEqual(0, diag.count(.warning));
+}
+
+test "load reports invalid motion" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var diag: Diagnostics = .init(arena);
+
+    try testing.expectError(error.InvalidRambler, loadTest(arena, &.{
+        .{ .name = "manifest.json", .data =
+        \\{ "id": "test", "name": "Test", "width": 2, "height": 2,
+        \\  "palette": { "k": "#000000" },
+        \\  "animations": { "walk": { "frames": ["a"] }, "run": { "frames": ["a"] }, "jump": { "frames": ["a"] } },
+        \\  "motion": { "run_speed": 0, "jump_height": 2.5, "jump": 3 } }
+        },
+        .{ .name = "a.sprite", .data = "k.\n.k\n" },
+    }, &diag));
+    const expected = [_][]const u8{
+        "motion.jump: unknown field (expected one of: speed, run_speed, jump_height)",
+        "motion.run_speed: expected a number from 1 to 64",
+        "motion.jump_height: expected an integer from 1 to 64",
     };
     try testing.expectEqual(expected.len, diag.items.items.len);
     for (expected, diag.items.items) |message, item| try testing.expectEqualStrings(message, item.message);
