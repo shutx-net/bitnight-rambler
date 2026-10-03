@@ -3,6 +3,12 @@
 //! the frames. All randomness comes from a seeded generator and time only
 //! advances in fixed steps, so the same seed always produces the same run.
 //!
+//! The rambler moves along a track (see Track) made of the edges it walks:
+//! along the bottom, and up the walls and across the ceiling if it has the
+//! frames for them. It always comes in from off screen along the bottom.
+//! Every decision and every frame uses the animations for the surface it
+//! is on, so it only rests, sleeps, runs or jumps where it can.
+//!
 //! Running, sleeping and jumping are up to the rambler: the actor only does
 //! them with the animation for it, and draws no random numbers for them
 //! otherwise, so that ramblers without them move as they always have.
@@ -30,6 +36,9 @@ state: State,
 elapsed_us: u64 = 0,
 /// Set in `once` mode when the rambler has left the screen.
 done: bool = false,
+/// Coming in from off screen along the bottom edge, whatever edges the
+/// rambler walks; cleared on first arrival.
+entering: bool = true,
 
 pub const Field = Track.Field;
 
@@ -168,7 +177,8 @@ pub fn frame(a: *const Actor) Frame {
         .resting => .idle,
         .sleeping => .sleep,
     };
-    const anim = a.rambler.animation(.floor, kind);
+    const spot = a.track().locate(a.position);
+    const anim = a.rambler.animation(spot.edge.surface(), kind);
     const frame_us = @as(u64, anim.frame_ms) * std.time.us_per_ms;
     const index = switch (kind) {
         // A jump starts from its first frame at every takeoff, and holds its
@@ -178,20 +188,48 @@ pub fn frame(a: *const Actor) Frame {
     };
     const sprite = anim.frames[index];
     const lifted = a.lift();
-    const at = Track.place(a.field, .bottom, @intFromFloat(@floor(a.position)), lifted, sprite);
+    const at = Track.place(a.field, spot.edge, @intFromFloat(@floor(spot.along)), lifted, sprite);
     return .{
         .sprite = sprite,
-        .edge = .bottom,
+        .edge = spot.edge,
         .x = at.x,
         .y = at.y,
         .lift = lifted,
-        .flip = .{ .x = (a.direction == .forward) != (a.rambler.facing == .right) },
+        .flip = a.flip(spot.edge),
     };
 }
 
-/// Whether the rambler has the animation for `kind`, and so may do it.
+/// How to flip a frame against edge `on` to face the direction of travel.
+/// Floor frames are drawn facing `facing`, ceiling frames upside down and
+/// facing `facing`, and wall frames on the right wall heading up.
+fn flip(a: *const Actor, on: Rambler.Edge) Canvas.Flip {
+    const forward = a.direction == .forward;
+    return switch (on) {
+        .bottom => .{ .x = forward != (a.rambler.facing == .right) },
+        // Forward is leftward on the ceiling.
+        .top => .{ .x = forward != (a.rambler.facing == .left) },
+        // Forward is up the right wall, and down the left one.
+        .right => .{ .y = !forward },
+        .left => .{ .x = true, .y = forward },
+    };
+}
+
+/// The edges the rambler walks along as a track: just the bottom while
+/// coming in and in `once` mode.
+fn track(a: *const Actor) Track {
+    const edges: std.EnumSet(Rambler.Edge) = if (a.mode == .once or a.entering) .initOne(.bottom) else a.rambler.edges;
+    return .init(edges, a.field, a.rambler.width);
+}
+
+/// The edge the rambler is on.
+fn edge(a: *const Actor) Rambler.Edge {
+    return a.track().locate(a.position).edge;
+}
+
+/// Whether the rambler has the animation for `kind` on the surface it is
+/// on, and so may do it there.
 fn can(a: *const Actor, kind: Rambler.Animation.Kind) bool {
-    return a.rambler.animations.get(.floor).get(kind) != null;
+    return a.rambler.animations.get(a.edge().surface()).get(kind) != null;
 }
 
 fn arrive(a: *Actor) void {
@@ -199,6 +237,9 @@ fn arrive(a: *Actor) void {
         a.done = true;
         return;
     }
+    a.entering = false;
+    // Keep positions on a loop within bounds; elsewhere this changes nothing.
+    a.position = a.track().wrap(a.position);
     const random = a.prng.random();
     if (a.can(.idle)) {
         if (random.float(f32) < rest_chance) return a.rest(random.intRangeAtMost(u64, min_rest_us, max_rest_us));
@@ -270,17 +311,34 @@ fn lift(a: *const Actor) u16 {
     return @intFromFloat(@round(4 * height * t * (1 - t)));
 }
 
-/// Picks a spot on screen, preferably a good stroll away from the current one.
+/// Picks a spot on the track, preferably a good stroll away from the
+/// current one. On a loop it is the shorter way round, and the target is
+/// not wrapped: it lies that far ahead of or behind the current position.
 fn randomTarget(a: *Actor) f32 {
-    const max_x = maxX(a.rambler, a.field.width);
+    const t = a.track();
     const random = a.prng.random();
-    const min_distance = @min(max_x / 3, 24);
-    var target: f32 = 0;
-    for (0..8) |_| {
-        target = @min(max_x, @floor(random.float(f32) * (max_x + 1)));
-        if (@abs(target - a.position) >= min_distance) break;
+    const start = t.start();
+    if (!t.loops()) {
+        const span = t.end() - start;
+        const min_distance = @min(span / 3, 24);
+        var target: f32 = 0;
+        for (0..8) |_| {
+            target = start + @min(span, @floor(random.float(f32) * (span + 1)));
+            if (@abs(target - a.position) >= min_distance) break;
+        }
+        return target;
     }
-    return target;
+    // Half the loop is the longest stroll, so a third of that is as far
+    // as a stroll should at least go.
+    const length = t.end() - start;
+    const min_distance = @min(length / 6, 24);
+    var offset: f32 = 0;
+    for (0..8) |_| {
+        const spot = start + @floor(random.float(f32) * length);
+        offset = @mod(spot - a.position + length / 2, length) - length / 2;
+        if (@abs(offset) >= min_distance) break;
+    }
+    return a.position + offset;
 }
 
 /// The rightmost position at which the whole sprite is still on screen.
@@ -340,11 +398,77 @@ fn testRamblerWith(with_idle: bool, kinds: []const Rambler.Animation.Kind) Rambl
     return r;
 }
 
+/// The one frame of animation `kind` on `surface` for `testClimber`, with
+/// pixels of its own so that tests can tell which set a frame came from.
+/// Wall frames stand on end: as wide as the rambler is tall, and as tall
+/// as it is wide.
+fn climberFrames(comptime surface: Rambler.Surface, comptime kind: Rambler.Animation.Kind) []const Sprite {
+    const frames = struct {
+        const number = @intFromEnum(surface) * std.meta.fields(Rambler.Animation.Kind).len + @intFromEnum(kind) + 1;
+        const pixels: [4]u8 = blk: {
+            var p: [4]u8 = undefined;
+            for (&p, 0..) |*pixel, i| pixel.* = if (number >> i & 1 != 0) 'k' else '.';
+            break :blk p;
+        };
+        const list = [_]Sprite{if (surface == .wall)
+            .{ .width = 1, .height = 4, .pixels = &pixels }
+        else
+            .{ .width = 4, .height = 1, .pixels = &pixels }};
+    };
+    return &frames.list;
+}
+
+/// A rambler that walks along the bottom and `edges`, with the animations
+/// for `floor`, `wall` and `ceiling` on each surface.
+fn testClimber(
+    edges: []const Rambler.Edge,
+    floor: []const Rambler.Animation.Kind,
+    wall: []const Rambler.Animation.Kind,
+    ceiling: []const Rambler.Animation.Kind,
+) Rambler {
+    var r = testRambler(false);
+    r.animations = .initFill(.initFill(null));
+    for (edges) |e| r.edges.insert(e);
+    inline for (comptime std.enums.values(Rambler.Surface)) |surface| {
+        const kinds = switch (surface) {
+            .floor => floor,
+            .wall => wall,
+            .ceiling => ceiling,
+        };
+        for (kinds) |kind| switch (kind) {
+            inline else => |k| r.animations.getPtr(surface).set(k, .{ .frames = climberFrames(surface, k), .frame_ms = 100 }),
+        };
+    }
+    return r;
+}
+
+const every_kind = std.enums.values(Rambler.Animation.Kind);
+const all_round = [_]Rambler.Edge{ .left, .right, .top };
+
+/// Whether `f` lies wholly on a canvas of `field`, and is drawn from the
+/// animations for the surface of its edge, standing on end on a wall.
+fn expectPlaced(rambler: *const Rambler, field: Field, f: Frame) !void {
+    try testing.expect(f.x >= 0 and f.y >= 0);
+    try testing.expect(f.x + f.sprite.width <= field.width and f.y + f.sprite.height <= field.height);
+    const upright = f.edge.surface() == .wall;
+    try testing.expectEqual(if (upright) rambler.width else rambler.height, f.sprite.height);
+    try testing.expectEqual(if (upright) rambler.height else rambler.width, f.sprite.width);
+    for (rambler.animations.get(f.edge.surface()).values) |maybe_anim| {
+        const anim = maybe_anim orelse continue;
+        for (anim.frames) |s| if (s.pixels.ptr == f.sprite.pixels.ptr) return;
+    }
+    return error.TestUnexpectedResult;
+}
+
 const tick_us = 33_333;
 const test_field: Field = .{ .width = 60, .height = 40 };
 
 test "the same seed produces the same run" {
-    for ([_]Rambler{ testRambler(true), testRamblerWith(true, &.{ .run, .sleep, .jump }) }) |rambler| {
+    for ([_]Rambler{
+        testRambler(true),
+        testRamblerWith(true, &.{ .run, .sleep, .jump }),
+        testClimber(&all_round, every_kind, every_kind, every_kind),
+    }) |rambler| {
         var a: Actor = .init(&rambler, .roam, 42, test_field);
         var b: Actor = .init(&rambler, .roam, 42, test_field);
         for (0..3000) |_| {
@@ -614,4 +738,114 @@ test "a resize wakes a rambler left off screen, and lets a jump finish" {
         try testing.expect(ticks < 100);
     }
     try testing.expectEqual(0, a.frame().lift);
+}
+
+test "climbers go round every edge and stay on screen" {
+    const rambler = testClimber(&all_round, every_kind, every_kind, every_kind);
+    for (0..5) |seed| {
+        var a: Actor = .init(&rambler, .roam, seed, test_field);
+        while (a.entering) a.update(tick_us);
+        var visited: std.EnumSet(Rambler.Edge) = .initEmpty();
+        for (0..20_000) |_| {
+            a.update(tick_us);
+            const f = a.frame();
+            try expectPlaced(&rambler, test_field, f);
+            visited.insert(f.edge);
+            const forward = a.direction == .forward;
+            const expected: Canvas.Flip = switch (f.edge) {
+                .bottom => .{ .x = !forward },
+                .top => .{ .x = forward },
+                .right => .{ .y = !forward },
+                .left => .{ .x = true, .y = forward },
+            };
+            try testing.expectEqual(expected, f.flip);
+        }
+        try testing.expect(visited.eql(.initFull()));
+    }
+}
+
+test "climbers only walk their edges" {
+    const Case = struct { edges: []const Rambler.Edge, never: Rambler.Edge };
+    const cases = [_]Case{
+        .{ .edges = &.{.right}, .never = .left },
+        .{ .edges = &.{.right}, .never = .top },
+        .{ .edges = &.{ .left, .top }, .never = .right },
+    };
+    for (cases) |case| {
+        const rambler = testClimber(case.edges, every_kind, every_kind, every_kind);
+        for (0..5) |seed| {
+            var a: Actor = .init(&rambler, .roam, seed, test_field);
+            var visited: std.EnumSet(Rambler.Edge) = .initEmpty();
+            for (0..20_000) |_| {
+                a.update(tick_us);
+                const f = a.frame();
+                try testing.expect(f.edge != case.never);
+                if (!a.entering) try expectPlaced(&rambler, test_field, f);
+                visited.insert(f.edge);
+            }
+            try testing.expect(visited.eql(rambler.edges));
+        }
+    }
+}
+
+test "climbers come in along the bottom" {
+    const rambler = testClimber(&all_round, every_kind, every_kind, every_kind);
+    var from_left = false;
+    var from_right = false;
+    for (0..10) |seed| {
+        var a: Actor = .init(&rambler, .roam, seed, test_field);
+        const target = a.state.walking.target;
+        try testing.expect(target >= 0 and target <= 56);
+        if (a.position < 0) from_left = true else from_right = true;
+        var ticks: usize = 0;
+        while (a.entering) : (ticks += 1) {
+            try testing.expectEqual(.bottom, a.edge());
+            try testing.expectEqual(.bottom, a.frame().edge);
+            try testing.expect(ticks < 1000);
+            a.update(tick_us);
+        }
+        try testing.expectEqual(target, a.position);
+    }
+    try testing.expect(from_left and from_right);
+}
+
+test "a loop goes the shorter way round" {
+    const rambler = testClimber(&all_round, every_kind, every_kind, every_kind);
+    const length = 184;
+    var crossed = false;
+    for (0..5) |seed| {
+        var a: Actor = .init(&rambler, .roam, seed, test_field);
+        while (a.entering) a.update(tick_us);
+        for (0..20_000) |_| {
+            const before = a;
+            a.update(tick_us);
+            if (a.state != .walking) continue;
+            // Only look at the ticks that set off.
+            if (before.state == .walking and before.state.walking.target == a.state.walking.target) continue;
+            const target = a.state.walking.target;
+            try testing.expect(a.position >= -length / 2 and a.position < length / 2);
+            try testing.expect(@abs(target - a.position) <= length / 2);
+            // Round the top-right corner, where the loop is joined.
+            if (target < -length / 2 or target >= length / 2) crossed = true;
+        }
+    }
+    try testing.expect(crossed);
+}
+
+test "ramblers only rest where they have idle frames" {
+    const rambler = testClimber(&all_round, &.{ .idle, .walk, .sleep }, &.{ .idle, .walk, .sleep }, &.{.walk});
+    var stopped: std.EnumSet(Rambler.Edge) = .initEmpty();
+    var visited: std.EnumSet(Rambler.Edge) = .initEmpty();
+    for (0..5) |seed| {
+        var a: Actor = .init(&rambler, .roam, seed, test_field);
+        for (0..20_000) |_| {
+            a.update(tick_us);
+            const on = a.frame().edge;
+            visited.insert(on);
+            if (a.state != .walking) stopped.insert(on);
+        }
+    }
+    try testing.expect(visited.contains(.top));
+    try testing.expect(!stopped.contains(.top));
+    try testing.expect(stopped.contains(.bottom) and stopped.contains(.left) and stopped.contains(.right));
 }
