@@ -52,6 +52,14 @@ pub fn parse(
         try diag.err(file, "sprite is empty", .{});
         return null;
     }
+    // When every row has the same wrong width, the whole sprite disagrees
+    // with the manifest: report that once rather than once per row.
+    const uniform_width = uniformRowWidth(body);
+    const wrong_width = uniform_width != null and uniform_width.? != width;
+    if (wrong_width) {
+        try diag.err(file, "every row is {d} pixels wide, but the manifest's width is {d}", .{ uniform_width.?, width });
+        problems += 1;
+    }
     var lines = std.mem.splitScalar(u8, body, '\n');
     var y: u32 = 0;
     while (lines.next()) |raw_line| : (y += 1) {
@@ -62,6 +70,7 @@ pub fn parse(
             return null;
         }
         if (line.len != width) {
+            if (wrong_width) continue;
             try diag.errAt(file, y + 1, 0, "expected {d} pixels in this row, found {d}", .{ width, line.len });
             problems += 1;
             if (problems >= max_reported) return null;
@@ -89,6 +98,18 @@ pub fn parse(
     }
     if (problems != 0) return null;
     return .{ .width = width, .height = height, .pixels = pixels };
+}
+
+/// The width shared by every row of `body`, or null if the rows differ. Also
+/// null for a single row, which is better reported with its line number.
+fn uniformRowWidth(body: []const u8) ?usize {
+    var lines = std.mem.splitScalar(u8, body, '\n');
+    const first = std.mem.trimEnd(u8, lines.first(), "\r").len;
+    var rows: usize = 1;
+    while (lines.next()) |raw_line| : (rows += 1) {
+        if (std.mem.trimEnd(u8, raw_line, "\r").len != first) return null;
+    }
+    return if (rows > 1) first else null;
 }
 
 fn countRemaining(lines: *std.mem.SplitIterator(u8, .scalar)) u32 {
@@ -154,4 +175,51 @@ test "parse without a palette still checks the shape" {
     try testing.expect(try parse(arena, "xy\nzw\n", 2, 2, null, &diag, "t.sprite") != null);
     try testing.expectEqual(null, try parse(arena, "xy\nz\n", 2, 2, null, &diag, "t.sprite"));
     try testing.expectEqual(1, diag.errorCount());
+}
+
+test "parse reports rows that are all the wrong width once" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const palette = testPalette();
+
+    var diag: Diagnostics = .init(arena);
+    try testing.expectEqual(null, try parse(arena, "k..k\r\n.oo.\r\nk..k\r\n", 3, 3, &palette, &diag, "t.sprite"));
+    try testing.expectEqual(1, diag.items.items.len);
+    try testing.expectEqual(0, diag.items.items[0].line);
+    try testing.expectEqualStrings("every row is 4 pixels wide, but the manifest's width is 3", diag.items.items[0].message);
+
+    diag = .init(arena);
+    try testing.expectEqual(null, try parse(arena, "k..k\n.oo.\n", 3, 3, &palette, &diag, "t.sprite"));
+    try testing.expectEqual(2, diag.items.items.len);
+    try testing.expectEqualStrings("every row is 4 pixels wide, but the manifest's width is 3", diag.items.items[0].message);
+    try testing.expectEqualStrings("expected 3 rows, found 2", diag.items.items[1].message);
+    try testing.expectEqual(0, diag.items.items[1].line);
+
+    diag = .init(arena);
+    try testing.expectEqual(null, try parse(arena, "k..k\n.oo.\nk..k\n.oo.\n", 3, 3, &palette, &diag, "t.sprite"));
+    try testing.expectEqual(2, diag.items.items.len);
+    try testing.expectEqualStrings("expected 3 rows, found 4", diag.items.items[1].message);
+    try testing.expectEqual(4, diag.items.items[1].line);
+}
+
+test "parse reports uneven rows and a single row one by one" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const palette = testPalette();
+
+    var diag: Diagnostics = .init(arena);
+    try testing.expectEqual(null, try parse(arena, "k..k\nkk\nk..k\n", 3, 3, &palette, &diag, "t.sprite"));
+    try testing.expectEqual(3, diag.items.items.len);
+    try testing.expectEqual(1, diag.items.items[0].line);
+    try testing.expectEqual(2, diag.items.items[1].line);
+    try testing.expectEqual(3, diag.items.items[2].line);
+    try testing.expectEqualStrings("expected 3 pixels in this row, found 2", diag.items.items[1].message);
+
+    diag = .init(arena);
+    try testing.expectEqual(null, try parse(arena, "k..k\n", 3, 1, &palette, &diag, "t.sprite"));
+    try testing.expectEqual(1, diag.items.items.len);
+    try testing.expectEqual(1, diag.items.items[0].line);
+    try testing.expectEqualStrings("expected 3 pixels in this row, found 4", diag.items.items[0].message);
 }
