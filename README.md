@@ -143,6 +143,10 @@ that do not match their directory or clash with a command or another
 rambler, and file size limits. Sprite files no animation uses produce a
 warning.
 
+CI runs `zig build validate` and `zig build test` on every pull request
+and every push to `main`, so a pull request shows these problems before
+it is merged.
+
 ## How it works
 
 - **Rendering.** Ramblers are drawn into a framebuffer of logical pixels.
@@ -181,5 +185,3 @@ src/
 - `run`, `sleep` and `jump` animations are accepted but not used.
 - A pseudo-terminal mode where ramblers share the screen with your shell,
   as described in the abstract, is a later-stage feature.
-- No CI yet; `zig build test` and `zig build validate` are what it would
-  run on pull requests.

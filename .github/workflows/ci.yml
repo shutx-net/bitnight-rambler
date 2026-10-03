@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Runs for the same pull request share a group, so a new push cancels the
+# older run. Any other run (a push to main, a manual run) gets a group of
+# its own: in a shared group, GitHub would cancel a run that is waiting
+# for another, even without cancel-in-progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      # With no `version`, setup-zig installs exactly the
+      # `minimum_zig_version` in build.zig.zon, the one place the version is
+      # set. It reads that file from the checkout (and would fall back to the
+      # latest Zig without it), so it must come after actions/checkout.
+      - uses: mlugg/setup-zig@v2
+      # Validate first: unlike the tests, it always says what is wrong with
+      # a rambler, and where.
+      - run: zig build validate
+      - run: zig build test --summary all
+
+  fmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          use-cache: false # zig fmt does not use the Zig cache
+      - run: zig fmt --check build.zig src
+
+  nix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      # Flakes are enabled by default.
+      - uses: cachix/install-nix-action@v31
+      # Builds the package, whose check phase runs `zig build test`, and the
+      # dev shell, for x86_64-linux.
+      - run: nix flake check -L
