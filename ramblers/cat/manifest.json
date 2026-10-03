@@ -1,7 +1,7 @@
 {
   "id": "cat",
   "name": "Cat",
-  "description": "A little tabby that strolls along the bottom of your terminal.",
+  "description": "A little tabby that strolls around the edges of your terminal.",
   "width": 16,
   "height": 12,
   "facing": "right",
@@ -18,6 +18,13 @@
     "run": { "frames": ["run-0", "run-1"], "frame_ms": 110 },
     "sleep": { "frames": ["sleep-0", "sleep-1"], "frame_ms": 800 },
     "jump": { "frames": ["run-1", "run-0"], "frame_ms": 120 }
+  },
+  "wall_animations": {
+    "walk": { "frames": ["climb-0", "climb-1", "climb-2", "climb-3"], "frame_ms": 160 },
+    "jump": { "frames": ["climb-1", "climb-0"], "frame_ms": 120 }
+  },
+  "ceiling_animations": {
+    "walk": { "frames": ["ceiling-walk-0", "ceiling-walk-1", "ceiling-walk-2", "ceiling-walk-3"], "frame_ms": 140 }
   },
   "motion": { "speed": 9, "run_speed": 20 }
 }
