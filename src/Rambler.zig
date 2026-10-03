@@ -17,9 +17,22 @@
 //!     "idle": { "frames": ["idle-0", "idle-1"], "frame_ms": 600 },
 //!     "walk": { "frames": ["walk-0", "walk-1"], "frame_ms": 140 }
 //!   },
+//!   "wall_animations": {
+//!     "walk": { "frames": ["climb-0", "climb-1"], "frame_ms": 160 }
+//!   },
+//!   "ceiling_animations": {
+//!     "walk": { "frames": ["ceiling-walk-0", "ceiling-walk-1"] }
+//!   },
+//!   "edges": ["bottom", "left", "right", "top"],
 //!   "motion": { "speed": 9 }
 //! }
 //! ```
+//!
+//! Only `animations` is required among the sets. `wall_animations` are
+//! drawn on the right-hand wall heading up, so their frames are `height`
+//! wide and `width` tall; `ceiling_animations` are drawn as they look
+//! against the top. `edges` defaults to every edge there are animations
+//! for, so here it could be left out.
 
 const Rambler = @This();
 
@@ -41,10 +54,11 @@ height: u16,
 /// when the rambler moves the other way.
 facing: Facing,
 palette: color.Palette,
-/// One set per surface; only the floor's is required.
+/// One set per surface, from `animations`, `wall_animations` and
+/// `ceiling_animations`; only the floor's is required.
 animations: std.EnumArray(Surface, Animations),
-/// The edges the rambler walks along: always the bottom, plus those it has
-/// the animations for and the manifest lists.
+/// The edges the rambler walks along, from `edges`: always the bottom,
+/// plus those it has the animations for and the manifest lists.
 edges: std.EnumSet(Edge),
 /// Movement speed in pixels (that is, terminal columns) per second.
 speed: f32,

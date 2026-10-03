@@ -41,8 +41,8 @@ pub fn get(c: *const Canvas, x: usize, y: usize) ?Rgb {
 }
 
 /// Which ways to flip a sprite when drawing it. Flips let contributors draw
-/// only one direction: a rambler heading left is mirrored, and one walking
-/// down a wall or along the ceiling is turned upside down.
+/// only one direction: a rambler heading left or onto the left wall is
+/// mirrored, and one heading down a wall is turned upside down.
 pub const Flip = struct {
     /// Mirror left to right.
     x: bool = false,
