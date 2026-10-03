@@ -49,14 +49,16 @@ pub const Mode = enum {
     once,
 };
 
+const Walking = struct {
+    target: f32,
+    /// At the run speed, with the `run` animation.
+    running: bool = false,
+    /// Time since takeoff while jumping; null on the ground.
+    airborne_us: ?u64 = null,
+};
+
 const State = union(enum) {
-    walking: struct {
-        target: f32,
-        /// At the run speed, with the `run` animation.
-        running: bool = false,
-        /// Time since takeoff while jumping; null on the ground.
-        airborne_us: ?u64 = null,
-    },
+    walking: Walking,
     resting: struct { remaining_us: u64 },
     sleeping: struct { remaining_us: u64 },
 };
@@ -124,11 +126,14 @@ pub fn update(a: *Actor, dt_us: u64) void {
             const speed = if (walking.running) a.rambler.run_speed else a.rambler.speed;
             const step = speed * @as(f32, @floatFromInt(dt_us)) / std.time.us_per_s;
             const distance = walking.target - a.position;
+            const from = a.edge();
             if (@abs(distance) > step) {
                 a.position += std.math.sign(distance) * step;
+                if (a.edge() != from) a.turnCorner(walking);
                 return;
             }
             a.position = walking.target;
+            if (a.edge() != from) a.turnCorner(walking);
             // Land first if the target was reached in mid-jump.
             if (walking.airborne_us == null) a.arrive();
         },
@@ -153,18 +158,34 @@ pub fn update(a: *Actor, dt_us: u64) void {
 
 /// Keeps the rambler's plans in line with a resized terminal.
 pub fn resize(a: *Actor, field: Field) void {
+    const old = a.track();
     a.field = field;
+    const t = a.track();
     switch (a.mode) {
         // Still head for the far edge, wherever that is now.
         .once => if (a.direction == .forward) {
             a.state.walking.target = @floatFromInt(field.width);
         },
-        // Come back if the screen shrank under the rambler or its target.
         .roam => {
-            const max_x = maxX(a.rambler, field.width);
-            const out_of_bounds = switch (a.state) {
-                .walking => |walking| walking.target > max_x,
-                .resting, .sleeping => a.position > max_x,
+            // Stay at the same spot on the same edge, and keep heading for
+            // the same spot, the same way round a loop.
+            a.position = t.carry(old, a.position);
+            switch (a.state) {
+                .walking => |*walking| {
+                    const target = t.carry(old, walking.target);
+                    const length = t.end() - t.start();
+                    walking.target = if (!t.loops()) target else switch (a.direction) {
+                        .forward => a.position + @mod(target - a.position, length),
+                        .backward => a.position - @mod(a.position - target, length),
+                    };
+                },
+                .resting, .sleeping => {},
+            }
+            // Come back if the screen shrank under the rambler or its
+            // target, past an open end of the track.
+            const out_of_bounds = !t.loops() and switch (a.state) {
+                .walking => |walking| walking.target < t.start() or walking.target > t.end(),
+                .resting, .sleeping => a.position < t.start() or a.position > t.end(),
             };
             if (out_of_bounds) a.setOff();
         },
@@ -232,6 +253,18 @@ fn can(a: *const Actor, kind: Rambler.Animation.Kind) bool {
     return a.rambler.animations.get(a.edge().surface()).get(kind) != null;
 }
 
+/// On coming round a corner: lands any jump, and drops a run the new
+/// surface has no frames for. Draws no random numbers.
+fn turnCorner(a: *Actor, walking: *Walking) void {
+    // A jump never goes round a corner (see `takesOff`); only a resize or
+    // the last tick of a jump can bring one there.
+    walking.airborne_us = null;
+    if (walking.running and !a.can(.run)) {
+        walking.running = false;
+        a.elapsed_us = 0;
+    }
+}
+
 fn arrive(a: *Actor) void {
     if (a.mode == .once) {
         a.done = true;
@@ -283,12 +316,14 @@ fn walkTo(a: *Actor, target: f32, running: bool) void {
 }
 
 /// Whether to jump now: while roaming, now and then, and only with room to
-/// land before the target.
+/// land before the target and before the next corner.
 fn takesOff(a: *Actor, target: f32, running: bool, dt_us: u64) bool {
     if (a.mode != .roam or !a.can(.jump)) return false;
     const speed = if (running) a.rambler.run_speed else a.rambler.speed;
     const reach = speed * @as(f32, @floatFromInt(a.airtimeUs())) / std.time.us_per_s;
     if (@abs(target - a.position) < reach) return false;
+    // None along the bottom alone, so this changes nothing there.
+    if (a.track().cornerAhead(a.position, a.direction)) |room| if (room < reach) return false;
     return a.prng.random().uintLessThan(u64, mean_jump_interval_us) < dt_us;
 }
 
@@ -339,11 +374,6 @@ fn randomTarget(a: *Actor) f32 {
         if (@abs(offset) >= min_distance) break;
     }
     return a.position + offset;
-}
-
-/// The rightmost position at which the whole sprite is still on screen.
-fn maxX(rambler: *const Rambler, field_width: u16) f32 {
-    return @floatFromInt(@max(0, @as(i32, field_width) - rambler.width));
 }
 
 const testing = std.testing;
@@ -848,4 +878,179 @@ test "ramblers only rest where they have idle frames" {
     try testing.expect(visited.contains(.top));
     try testing.expect(!stopped.contains(.top));
     try testing.expect(stopped.contains(.bottom) and stopped.contains(.left) and stopped.contains(.right));
+}
+
+test "a jump never goes round a corner" {
+    const rambler = testClimber(&all_round, every_kind, every_kind, every_kind);
+    var jumped: std.EnumSet(Rambler.Edge) = .initEmpty();
+    for (0..5) |seed| {
+        var a: Actor = .init(&rambler, .roam, seed, test_field);
+        for (0..20_000) |_| {
+            const before = a;
+            a.update(tick_us);
+            const was_airborne = before.state == .walking and before.state.walking.airborne_us != null;
+            const airborne = a.state == .walking and a.state.walking.airborne_us != null;
+            // In the air the rambler stays on its edge, and lands on
+            // reaching another.
+            if (airborne) try testing.expectEqual(before.edge(), a.edge());
+            if (was_airborne or !airborne) continue;
+            // Taken off with room to land before the next corner.
+            const walking = before.state.walking;
+            const speed = if (walking.running) rambler.run_speed else rambler.speed;
+            const reach = speed * @as(f32, @floatFromInt(a.airtimeUs())) / std.time.us_per_s;
+            if (before.track().cornerAhead(before.position, before.direction)) |room| try testing.expect(room >= reach);
+            jumped.insert(before.edge());
+        }
+    }
+    try testing.expect(jumped.eql(.initFull()));
+
+    // Brought to a corner in mid-air, as by a resize, it lands there and
+    // walks on.
+    var a: Actor = .init(&rambler, .roam, 1, test_field);
+    while (a.entering) a.update(tick_us);
+    a.position = 55;
+    a.direction = .forward;
+    a.state = .{ .walking = .{ .target = 70, .airborne_us = 0 } };
+    var ticks: usize = 0;
+    while (a.edge() == .bottom) : (ticks += 1) {
+        try testing.expect(a.state.walking.airborne_us != null);
+        try testing.expect(ticks < 10);
+        a.update(tick_us);
+    }
+    try testing.expectEqual(Walking{ .target = 70 }, a.state.walking);
+    try testing.expectEqual(0, a.frame().lift);
+}
+
+test "running turns to walking where the rambler cannot run" {
+    const rambler = testClimber(&all_round, &.{ .idle, .walk, .run }, &.{ .idle, .walk }, &.{ .idle, .walk });
+    var ran = false;
+    var turned = false;
+    for (0..5) |seed| {
+        var a: Actor = .init(&rambler, .roam, seed, test_field);
+        for (0..20_000) |_| {
+            const before = a;
+            a.update(tick_us);
+            if (a.state != .walking) continue;
+            if (a.state.walking.running) {
+                ran = true;
+                try testing.expectEqual(.bottom, a.edge());
+            } else if (before.state == .walking and before.state.walking.running and a.state.walking.target == before.state.walking.target) {
+                // Went round a corner at a run, and walks on from there,
+                // with the walk cycle from its start.
+                turned = true;
+                try testing.expect(a.edge() != .bottom);
+                try testing.expectEqual(0, a.elapsed_us);
+            }
+        }
+    }
+    try testing.expect(ran and turned);
+}
+
+test "a resize keeps a climber on its edge" {
+    const rambler = testClimber(&all_round, every_kind, every_kind, every_kind);
+    var a: Actor = .init(&rambler, .roam, 1, test_field);
+    while (a.entering) a.update(tick_us);
+    // Resting against the right wall, 10 pixels from the top.
+    a.position = a.track().position(.right, 10);
+    a.state = .{ .resting = .{ .remaining_us = std.time.us_per_min } };
+    for ([_]Field{ .{ .width = 80, .height = 40 }, .{ .width = 30, .height = 40 }, test_field }) |field| {
+        a.resize(field);
+        try testing.expect(a.state == .resting);
+        const f = a.frame();
+        try expectPlaced(&rambler, field, f);
+        try testing.expectEqual(.right, f.edge);
+        try testing.expectEqual(@as(i32, field.width) - f.sprite.width, f.x);
+        try testing.expectEqual(10, f.y);
+    }
+    // A screen too short for that pulls it down to the foot of the wall,
+    // a corner, which belongs to the floor.
+    const short: Field = .{ .width = 60, .height = 12 };
+    a.resize(short);
+    try testing.expect(a.state == .resting);
+    try expectPlaced(&rambler, short, a.frame());
+    try testing.expectEqual(a.track().position(.right, 8), a.position);
+    try testing.expectEqual(Track.Spot{ .edge = .bottom, .along = 56 }, a.track().locate(a.position));
+
+    // On a loop a stroll keeps going the same way round, even across the
+    // top-right corner where the loop is joined.
+    for ([_]Track.Direction{ .forward, .backward }) |direction| {
+        var b: Actor = .init(&rambler, .roam, 1, test_field);
+        while (b.entering) b.update(tick_us);
+        // 20 pixels from a spot on the ceiling, or on the right wall.
+        const t = b.track();
+        b.position = switch (direction) {
+            .forward => t.position(.right, 5),
+            .backward => t.position(.top, 51),
+        };
+        b.direction = direction;
+        b.state = .{ .walking = .{ .target = if (direction == .forward) b.position + 20 else b.position - 20 } };
+        const wide: Field = .{ .width = 80, .height = 48 };
+        b.resize(wide);
+        try testing.expectEqual(direction, b.direction);
+        // 5 pixels down the wall and 35 along the ceiling, or the other
+        // way round.
+        try testing.expectEqual(40, @abs(b.state.walking.target - b.position));
+        try testing.expectEqual(direction == .forward, b.state.walking.target > b.position);
+        const target = b.track().locate(b.state.walking.target);
+        try testing.expectEqual(Track.Spot{ .edge = if (direction == .forward) .top else .right, .along = if (direction == .forward) 41 else 15 }, target);
+        // Walks there, all the way the same way.
+        const goal = b.state.walking.target;
+        var ticks: usize = 0;
+        while (b.state == .walking and b.state.walking.target == goal) : (ticks += 1) {
+            const before = b.position;
+            b.update(tick_us);
+            try expectPlaced(&rambler, wide, b.frame());
+            try testing.expect(ticks < 1000);
+            if (b.state == .walking and b.state.walking.target == goal) try testing.expectEqual(direction == .forward, b.position > before);
+        }
+        // Arriving brings the position back within the loop.
+        try testing.expectEqual(b.track().wrap(goal), b.position);
+    }
+}
+
+test "a resize calls a climber back past an open end" {
+    const rambler = testClimber(&.{.left}, every_kind, every_kind, every_kind);
+    var a: Actor = .init(&rambler, .roam, 1, test_field);
+    while (a.entering) a.update(tick_us);
+    // Resting too far right to fit on a 30-column screen.
+    a.position = 50;
+    a.state = .{ .resting = .{ .remaining_us = std.time.us_per_min } };
+    a.resize(.{ .width = 30, .height = 40 });
+    // Walks back on screen, like a rambler along the bottom alone.
+    try testing.expect(a.state == .walking);
+    try testing.expectEqual(.backward, a.direction);
+    try testing.expectEqual(50, a.position);
+    try testing.expect(a.state.walking.target >= a.track().start() and a.state.walking.target <= 26);
+}
+
+const Diagnostics = @import("Diagnostics.zig");
+const Source = @import("Source.zig");
+const builtin_ramblers = @import("builtin_ramblers");
+
+test "every built-in rambler roams on screen" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    for (builtin_ramblers.entries) |entry| {
+        var diag: Diagnostics = .init(arena);
+        const rambler = try Rambler.load(arena, Source.embedded(entry), &diag);
+        for ([_]Field{ .{ .width = 80, .height = 48 }, .{ .width = 40, .height = 20 } }) |first| {
+            var field = first;
+            var a: Actor = .init(&rambler, .roam, 5, field);
+            // Off screen until it has come in, and after a resize until it
+            // has come back from wherever that left it.
+            var away = true;
+            for (0..20_000) |tick| {
+                if (tick == 10_000) {
+                    field = if (field.width == 80) .{ .width = 40, .height = 20 } else .{ .width = 80, .height = 48 };
+                    a.resize(field);
+                    away = true;
+                }
+                const before = a;
+                a.update(tick_us);
+                if (!a.entering and before.state == .walking and (a.state != .walking or a.state.walking.target != before.state.walking.target)) away = false;
+                if (!away) try expectPlaced(&rambler, field, a.frame());
+            }
+        }
+    }
 }
