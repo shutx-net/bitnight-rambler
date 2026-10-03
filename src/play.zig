@@ -64,7 +64,7 @@ pub fn play(gpa: Allocator, io: Io, rambler: *const Rambler, options: Options) !
         canvas.clear();
         // Ramblers walk along the bottom edge, and jump up from it.
         const y = @as(i32, canvas.height) - frame.sprite.height - frame.lift;
-        canvas.drawSprite(frame.sprite, &rambler.palette, frame.x, y, frame.mirror);
+        canvas.drawSprite(frame.sprite, &rambler.palette, frame.x, y, .{ .x = frame.mirror });
         screen.compose(&canvas);
         try screen.flush(out);
         try out.flush();

@@ -358,7 +358,7 @@ fn preview(arena: Allocator, io: Io, r: *const Rambler, mode: color.Mode, stdout
             const width: u16 = @intCast(line.len * r.width + (line.len - 1) * gap);
             var canvas: Canvas = try .init(arena, width, height);
             for (line, 0..) |frame, i| {
-                canvas.drawSprite(frame, &r.palette, @intCast(i * (r.width + gap)), 0, false);
+                canvas.drawSprite(frame, &r.palette, @intCast(i * (r.width + gap)), 0, .{});
             }
             const cells = try arena.alloc(Screen.Cell, @as(usize, width) * (height / 2));
             Screen.cellsFromCanvas(cells, &canvas);
