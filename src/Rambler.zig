@@ -56,8 +56,8 @@ pub const Animation = struct {
     frames: []const Sprite,
     frame_ms: u32,
 
-    /// Only `idle` and `walk` are used by the engine so far; the others are
-    /// accepted so that rambler packs can already provide them.
+    /// At least one of `idle` and `walk` is required. The actor only runs,
+    /// sleeps or jumps if the rambler has the animation for it.
     pub const Kind = enum { idle, walk, run, sleep, jump };
 };
 
