@@ -8,7 +8,7 @@
 //! {
 //!   "id": "cat",
 //!   "name": "Cat",
-//!   "description": "A tabby that strolls along the bottom of your terminal.",
+//!   "description": "A tabby that strolls around the edges of your terminal.",
 //!   "width": 16,
 //!   "height": 12,
 //!   "facing": "right",
@@ -43,7 +43,8 @@ facing: Facing,
 palette: color.Palette,
 /// One set per surface; only the floor's is required.
 animations: std.EnumArray(Surface, Animations),
-/// The edges the rambler walks along: always the bottom.
+/// The edges the rambler walks along: always the bottom, plus those it has
+/// the animations for and the manifest lists.
 edges: std.EnumSet(Edge),
 /// Movement speed in pixels (that is, terminal columns) per second.
 speed: f32,
@@ -138,7 +139,7 @@ pub fn load(arena: Allocator, source: Source, diag: *Diagnostics) LoadError!Ramb
     const root_object = try parseJson(arena, text, manifest_path, diag) orelse return error.InvalidRambler;
     const root: Fields = .{ .members = root_object, .path = "", .file = manifest_path, .diag = diag, .arena = arena };
 
-    try root.rejectUnknown(&.{ "id", "name", "description", "width", "height", "facing", "palette", "animations", "motion" });
+    try root.rejectUnknown(&.{ "id", "name", "description", "width", "height", "facing", "palette", "animations", "wall_animations", "ceiling_animations", "edges", "motion" });
 
     const id = try root.string("id", null, limits.max_id_len) orelse "";
     if (id.len != 0) try checkId(root, id, source.id);
@@ -179,7 +180,10 @@ pub fn load(arena: Allocator, source: Source, diag: *Diagnostics) LoadError!Ramb
 
     var sprites: SpriteCache = .{ .source = source, .geometry = geometry, .diag = diag };
     var animations: std.EnumArray(Surface, Animations) = .initFill(.initFill(null));
-    animations.set(.floor, try parseAnimations(root, &sprites));
+    animations.set(.floor, try parseAnimations(root, "animations", .floor, &sprites));
+    animations.set(.wall, try parseAnimations(root, "wall_animations", .wall, &sprites));
+    animations.set(.ceiling, try parseAnimations(root, "ceiling_animations", .ceiling, &sprites));
+    const edges = try parseEdges(root);
 
     if (geometry != null) {
         for (try source.fileNames(arena)) |file_name| {
@@ -200,7 +204,7 @@ pub fn load(arena: Allocator, source: Source, diag: *Diagnostics) LoadError!Ramb
         .facing = facing,
         .palette = palette.?,
         .animations = animations,
-        .edges = .initOne(.bottom),
+        .edges = edges,
         .speed = @floatCast(speed),
         .run_speed = @floatCast(run_speed),
         .jump_height = @intCast(jump_height),
@@ -274,16 +278,18 @@ fn parsePalette(root: Fields) Allocator.Error!?color.Palette {
     return if (ok) palette else null;
 }
 
-fn parseAnimations(root: Fields, sprites: *SpriteCache) Allocator.Error!Animations {
+/// Parses the set of animations under `key`, for `surface`. Only the
+/// floor's is required.
+fn parseAnimations(root: Fields, key: []const u8, surface: Surface, sprites: *SpriteCache) Allocator.Error!Animations {
     var animations: Animations = .initFill(null);
-    const fields = try root.object("animations", true) orelse return animations;
+    const fields = try root.object(key, surface == .floor) orelse return animations;
 
-    for (fields.members.keys()) |key| {
-        const kind = std.meta.stringToEnum(Animation.Kind, key) orelse {
-            try fields.fail(key, "unknown animation (expected one of: idle, walk, run, sleep, jump)", .{});
+    for (fields.members.keys()) |name| {
+        const kind = std.meta.stringToEnum(Animation.Kind, name) orelse {
+            try fields.fail(name, "unknown animation (expected one of: idle, walk, run, sleep, jump)", .{});
             continue;
         };
-        const anim = try fields.object(key, true) orelse continue;
+        const anim = try fields.object(name, true) orelse continue;
         try anim.rejectUnknown(&.{ "frames", "frame_ms" });
         const frame_ms = try anim.integer("frame_ms", default_frame_ms, limits.min_frame_ms, limits.max_frame_ms);
         const names = try anim.array("frames") orelse continue;
@@ -308,24 +314,88 @@ fn parseAnimations(root: Fields, sprites: *SpriteCache) Allocator.Error!Animatio
                 complete = false;
                 continue;
             }
-            if (try sprites.get(root.arena, frame_name)) |s| frame.* = s else complete = false;
+            if (try sprites.get(root.arena, frame_name, surface)) |s| frame.* = s else complete = false;
         }
         if (complete and frame_ms != null) {
             animations.set(kind, .{ .frames = frames, .frame_ms = @intCast(frame_ms.?) });
         }
     }
     if (fields.members.get("idle") == null and fields.members.get("walk") == null) {
-        try root.fail("animations", "must define at least \"idle\" or \"walk\"", .{});
+        try root.fail(key, "must define at least \"idle\" or \"walk\"", .{});
     }
     return animations;
 }
 
+/// Parses `edges`, which defaults to every edge the rambler has the
+/// animations for. Whether a set of animations is there is taken from the
+/// JSON alone, so that a set with problems of its own does not also make
+/// the edges that use it look wrong.
+fn parseEdges(root: Fields) Allocator.Error!std.EnumSet(Edge) {
+    const has_walls = root.members.contains("wall_animations");
+    const has_ceiling = root.members.contains("ceiling_animations");
+    var edges: std.EnumSet(Edge) = .initOne(.bottom);
+
+    if (!root.members.contains("edges")) {
+        if (has_walls) {
+            edges.insert(.left);
+            edges.insert(.right);
+            if (has_ceiling) edges.insert(.top);
+        } else if (has_ceiling) {
+            try root.warn("ceiling_animations", "not used without \"wall_animations\" to reach the ceiling", .{});
+        }
+        return edges;
+    }
+
+    const items = try root.array("edges") orelse return edges;
+    edges = .initEmpty();
+    var all_known = true;
+    for (items, 0..) |value, i| {
+        const edge = switch (value) {
+            .string => |s| std.meta.stringToEnum(Edge, s),
+            else => null,
+        } orelse {
+            try root.failIndex("edges", i, "expected \"bottom\", \"left\", \"right\" or \"top\"", .{});
+            all_known = false;
+            continue;
+        };
+        if (edges.contains(edge)) {
+            try root.failIndex("edges", i, "\"{t}\" is listed twice", .{edge});
+            continue;
+        }
+        edges.insert(edge);
+        switch (edge) {
+            .bottom => {},
+            .left, .right => if (!has_walls) try root.failIndex("edges", i, "\"{t}\" needs \"wall_animations\"", .{edge}),
+            .top => if (!has_ceiling) try root.failIndex("edges", i, "\"top\" needs \"ceiling_animations\"", .{}),
+        }
+    }
+    // An edge that is not recognized may be the one that seems missing.
+    if (!all_known) return edges;
+
+    const has_side = edges.contains(.left) or edges.contains(.right);
+    if (!edges.contains(.bottom)) {
+        try root.fail("edges", "must include \"bottom\", where ramblers come in", .{});
+    }
+    if (edges.contains(.top) and !has_side) {
+        try root.fail("edges", "\"top\" is only reached by a wall: add \"left\" or \"right\"", .{});
+    }
+    if (has_walls and !has_side) {
+        try root.warn("wall_animations", "not used without \"left\" or \"right\" in \"edges\"", .{});
+    }
+    if (has_ceiling and !edges.contains(.top)) {
+        try root.warn("ceiling_animations", "not used without \"top\" in \"edges\"", .{});
+    }
+    return edges;
+}
+
 /// Warns about a motion field that has no effect because there is no
-/// animation to go with it, which may be a typo in the animation's name.
+/// animation to go with it on any surface, which may be a typo in the
+/// animation's name.
 fn warnIfUnused(root: Fields, motion: Fields, key: []const u8, kind: Animation.Kind) Allocator.Error!void {
     if (!motion.members.contains(key)) return;
-    if (root.members.get("animations")) |animations| {
-        if (animations == .object and animations.object.contains(@tagName(kind))) return;
+    for ([_][]const u8{ "animations", "wall_animations", "ceiling_animations" }) |set_key| {
+        const set = root.members.get(set_key) orelse continue;
+        if (set == .object and set.object.contains(@tagName(kind))) return;
     }
     try motion.warn(key, "not used without a \"{t}\" animation", .{kind});
 }
@@ -346,34 +416,59 @@ const Geometry = struct {
     palette: ?*const color.Palette,
 };
 
-/// Loads each sprite file once, however many animations use it.
+/// Reads each sprite file once, however many animations use it, and parses
+/// it once for each way it is used: upright on the floor and the ceiling,
+/// sideways on a wall, where frames are as wide as the rambler is tall.
 const SpriteCache = struct {
     source: Source,
     /// Null when the manifest's size is invalid; sprite files are then only
     /// checked for existence.
     geometry: ?Geometry,
     diag: *Diagnostics,
-    /// Keyed by frame name; null for files that failed to load.
-    loaded: std.StringHashMapUnmanaged(?Sprite) = .empty,
+    /// Keyed by frame name.
+    loaded: std.StringHashMapUnmanaged(Entry) = .empty,
 
-    fn get(c: *SpriteCache, arena: Allocator, frame_name: []const u8) Allocator.Error!?Sprite {
-        const entry = try c.loaded.getOrPut(arena, frame_name);
-        if (entry.found_existing) return entry.value_ptr.*;
-        entry.value_ptr.* = null;
+    const Entry = struct {
+        path: []const u8,
+        /// Null for files that are missing or unreadable, which have been
+        /// reported once already.
+        text: ?[]const u8,
+        /// Null until parsed; then null inside if the sprite is invalid.
+        upright: ??Sprite = null,
+        sideways: ??Sprite = null,
+    };
 
+    fn get(c: *SpriteCache, arena: Allocator, frame_name: []const u8, surface: Surface) Allocator.Error!?Sprite {
+        const result = try c.loaded.getOrPut(arena, frame_name);
+        const entry = result.value_ptr;
+        if (!result.found_existing) entry.* = try c.read(arena, frame_name);
+
+        const text = entry.text orelse return null;
+        const g = c.geometry orelse return null;
+        // Square frames fit a wall as they are, so they are parsed only once.
+        const sideways = surface == .wall and g.width != g.height;
+        const parsed = if (sideways) &entry.sideways else &entry.upright;
+        if (parsed.* == null) {
+            parsed.* = if (sideways)
+                try sprite.parse(arena, text, g.height, g.width, "the manifest's height, the width of wall frames,", g.palette, c.diag, entry.path)
+            else
+                try sprite.parse(arena, text, g.width, g.height, "the manifest's width", g.palette, c.diag, entry.path);
+        }
+        return parsed.*.?;
+    }
+
+    fn read(c: *SpriteCache, arena: Allocator, frame_name: []const u8) Allocator.Error!Entry {
         const file_name = try std.fmt.allocPrint(arena, "{s}.sprite", .{frame_name});
         const file_path = try c.source.path(arena, file_name);
         const text = c.source.read(arena, file_name, limits.max_sprite_bytes, c.diag) catch |err| switch (err) {
-            error.FileNotFound => {
+            error.FileNotFound => blk: {
                 try c.diag.err(file_path, "missing sprite file (referenced as frame \"{s}\")", .{frame_name});
-                return null;
+                break :blk null;
             },
-            error.Unreadable => return null,
+            error.Unreadable => null,
             error.OutOfMemory => return error.OutOfMemory,
         };
-        const g = c.geometry orelse return null;
-        entry.value_ptr.* = try sprite.parse(arena, text, g.width, g.height, g.palette, c.diag, file_path);
-        return entry.value_ptr.*;
+        return .{ .path = file_path, .text = text };
     }
 };
 
@@ -539,7 +634,7 @@ test "load reports every problem" {
     }, &diag));
 
     const expected = [_][]const u8{
-        "speeed: unknown field (expected one of: id, name, description, width, height, facing, palette, animations, motion)",
+        "speeed: unknown field (expected one of: id, name, description, width, height, facing, palette, animations, wall_animations, ceiling_animations, edges, motion)",
         "id: must consist of lowercase letters, digits and '-', and must not start with '-'",
         "height: expected an integer from 1 to 64",
         "palette...: palette symbols must be a single printable character other than space and '.'",
@@ -662,6 +757,197 @@ test "load reports invalid motion" {
     };
     try testing.expectEqual(expected.len, diag.items.items.len);
     for (expected, diag.items.items) |message, item| try testing.expectEqualStrings(message, item.message);
+}
+
+test "load wall and ceiling animations" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var diag: Diagnostics = .init(arena);
+
+    // Wall frames are turned on their side: as wide as the rambler is tall.
+    const r = try loadTest(arena, &.{
+        .{ .name = "manifest.json", .data =
+        \\{ "id": "test", "name": "Test", "width": 3, "height": 2,
+        \\  "palette": { "k": "#000000" },
+        \\  "animations": { "walk": { "frames": ["floor"] } },
+        \\  "wall_animations": { "walk": { "frames": ["wall", "wall"] } },
+        \\  "ceiling_animations": { "idle": { "frames": ["ceiling"] } } }
+        },
+        .{ .name = "floor.sprite", .data = "kk.\n.kk\n" },
+        .{ .name = "wall.sprite", .data = "k.\n.k\nk.\n" },
+        .{ .name = "ceiling.sprite", .data = "kkk\n...\n" },
+    }, &diag);
+    try testing.expectEqual(0, diag.items.items.len);
+    try testing.expectEqual(4, r.edges.count());
+    // `idle` falls back to `walk` on a wall too, and `walk` to `idle` on the
+    // ceiling.
+    const wall = r.animation(.wall, .idle);
+    try testing.expectEqual(2, wall.frames.len);
+    try testing.expectEqual(2, wall.frames[0].width);
+    try testing.expectEqual(3, wall.frames[0].height);
+    const ceiling = r.animation(.ceiling, .walk);
+    try testing.expectEqual(3, ceiling.frames[0].width);
+    try testing.expectEqual(2, ceiling.frames[0].height);
+    try testing.expectEqual('k', ceiling.frames[0].at(2, 0));
+
+    // A square frame fits every surface as it is, and is parsed only once.
+    const square = try loadTest(arena, &.{
+        .{ .name = "manifest.json", .data =
+        \\{ "id": "test", "name": "Test", "width": 2, "height": 2,
+        \\  "palette": { "k": "#000000" },
+        \\  "animations": { "walk": { "frames": ["a"] } },
+        \\  "wall_animations": { "walk": { "frames": ["a"] } } }
+        },
+        .{ .name = "a.sprite", .data = "k.\n.k\n" },
+    }, &diag);
+    try testing.expectEqual(0, diag.items.items.len);
+    try testing.expectEqual(
+        square.animation(.floor, .walk).frames[0].pixels.ptr,
+        square.animation(.wall, .walk).frames[0].pixels.ptr,
+    );
+    try testing.expectEqual(3, square.edges.count());
+    try testing.expect(!square.edges.contains(.top));
+}
+
+test "wall frames are as wide as the manifest's height" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var diag: Diagnostics = .init(arena);
+
+    try testing.expectError(error.InvalidRambler, loadTest(arena, &.{
+        .{ .name = "manifest.json", .data =
+        \\{ "id": "test", "name": "Test", "width": 3, "height": 2,
+        \\  "palette": { "k": "#000000" },
+        \\  "animations": { "walk": { "frames": ["floor"] }, "idle": { "frames": ["missing"] } },
+        \\  "wall_animations": { "walk": { "frames": ["floor", "missing"] } } }
+        },
+        .{ .name = "floor.sprite", .data = "kk.\n.kk\n" },
+    }, &diag));
+    // The missing file is reported once, however many sets refer to it.
+    const expected = [_][]const u8{
+        "missing sprite file (referenced as frame \"missing\")",
+        "every row is 3 pixels wide, but the manifest's height, the width of wall frames, is 2",
+        "expected 3 rows, found 2",
+    };
+    try testing.expectEqual(expected.len, diag.items.items.len);
+    for (expected, diag.items.items) |message, item| try testing.expectEqualStrings(message, item.message);
+    try testing.expect(std.mem.endsWith(u8, diag.items.items[1].file, "floor.sprite"));
+}
+
+/// Loads a 2×2 rambler that walks on the floor with frame "a", plus the
+/// manifest members in `members`, each preceded by a comma.
+fn loadWithMembers(arena: Allocator, comptime members: []const u8, diag: *Diagnostics) LoadError!Rambler {
+    return loadTest(arena, &.{
+        .{ .name = "manifest.json", .data =
+        \\{ "id": "test", "name": "Test", "width": 2, "height": 2,
+        \\  "palette": { "k": "#000000" },
+        \\  "animations": { "walk": { "frames": ["a"] } }
+        ++ members ++ " }" },
+        .{ .name = "a.sprite", .data = "k.\n.k\n" },
+    }, diag);
+}
+
+const test_walls = ", \"wall_animations\": { \"walk\": { \"frames\": [\"a\"] } }";
+const test_ceiling = ", \"ceiling_animations\": { \"idle\": { \"frames\": [\"a\"] } }";
+
+test "load checks edges" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var diag: Diagnostics = .init(arena);
+
+    const cases = .{
+        .{ test_walls ++ ", \"edges\": \"bottom\"", .{
+            "edges: expected an array",
+        } },
+        // An edge that is not recognized may be the one that seems missing.
+        .{ test_walls ++ test_ceiling ++ ", \"edges\": [3, \"side\", \"left\"]", .{
+            "edges[0]: expected \"bottom\", \"left\", \"right\" or \"top\"",
+            "edges[1]: expected \"bottom\", \"left\", \"right\" or \"top\"",
+        } },
+        .{ ", \"edges\": [\"bottom\", \"bottom\"]", .{
+            "edges[1]: \"bottom\" is listed twice",
+        } },
+        .{ ", \"edges\": [\"bottom\", \"left\", \"right\"]", .{
+            "edges[1]: \"left\" needs \"wall_animations\"",
+            "edges[2]: \"right\" needs \"wall_animations\"",
+        } },
+        .{ test_walls ++ ", \"edges\": [\"bottom\", \"left\", \"top\"]", .{
+            "edges[2]: \"top\" needs \"ceiling_animations\"",
+        } },
+        .{ test_walls ++ ", \"edges\": [\"left\", \"right\"]", .{
+            "edges: must include \"bottom\", where ramblers come in",
+        } },
+        .{ ", \"edges\": []", .{
+            "edges: must include \"bottom\", where ramblers come in",
+        } },
+        .{ test_walls ++ test_ceiling ++ ", \"edges\": [\"bottom\", \"top\"]", .{
+            "edges: \"top\" is only reached by a wall: add \"left\" or \"right\"",
+            "wall_animations: not used without \"left\" or \"right\" in \"edges\"",
+        } },
+    };
+    inline for (cases) |case| {
+        diag = .init(arena);
+        try testing.expectError(error.InvalidRambler, loadWithMembers(arena, case[0], &diag));
+        try testing.expectEqual(case[1].len, diag.items.items.len);
+        inline for (case[1], 0..) |message, i| try testing.expectEqualStrings(message, diag.items.items[i].message);
+    }
+
+    diag = .init(arena);
+    const listed = try loadWithMembers(arena, test_walls ++ ", \"edges\": [\"bottom\", \"right\"]", &diag);
+    try testing.expectEqual(0, diag.items.items.len);
+    try testing.expectEqual(2, listed.edges.count());
+    try testing.expect(listed.edges.contains(.bottom) and listed.edges.contains(.right));
+
+    // By default, every edge there are animations for.
+    const walls = try loadWithMembers(arena, test_walls, &diag);
+    try testing.expectEqual(0, diag.items.items.len);
+    try testing.expectEqual(3, walls.edges.count());
+    try testing.expect(!walls.edges.contains(.top));
+
+    const ceiling = try loadWithMembers(arena, test_ceiling, &diag);
+    try testing.expectEqual(1, diag.items.items.len);
+    try testing.expectEqual(.warning, diag.items.items[0].severity);
+    try testing.expectEqualStrings(
+        "ceiling_animations: not used without \"wall_animations\" to reach the ceiling",
+        diag.items.items[0].message,
+    );
+    try testing.expectEqual(1, ceiling.edges.count());
+    try testing.expect(ceiling.edges.contains(.bottom));
+}
+
+test "load warns about animations that no edge uses" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var diag: Diagnostics = .init(arena);
+
+    _ = try loadWithMembers(arena, test_walls ++ test_ceiling ++ ", \"edges\": [\"bottom\"]", &diag);
+    const expected = [_][]const u8{
+        "wall_animations: not used without \"left\" or \"right\" in \"edges\"",
+        "ceiling_animations: not used without \"top\" in \"edges\"",
+    };
+    try testing.expectEqual(expected.len, diag.items.items.len);
+    for (expected, diag.items.items) |message, item| {
+        try testing.expectEqual(.warning, item.severity);
+        try testing.expectEqualStrings(message, item.message);
+    }
+
+    diag = .init(arena);
+    _ = try loadWithMembers(arena, test_walls ++ test_ceiling ++ ", \"edges\": [\"bottom\", \"left\"]", &diag);
+    try testing.expectEqual(1, diag.items.items.len);
+    try testing.expectEqualStrings(expected[1], diag.items.items[0].message);
+
+    // A run up the wall is enough for a run speed.
+    diag = .init(arena);
+    const r = try loadWithMembers(arena,
+        \\, "wall_animations": { "walk": { "frames": ["a"] }, "run": { "frames": ["a"] } },
+        \\  "motion": { "run_speed": 20 }
+    , &diag);
+    try testing.expectEqual(0, diag.items.items.len);
+    try testing.expectEqual(20, r.run_speed);
 }
 
 test "load reports invalid JSON with its position" {
