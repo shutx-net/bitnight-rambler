@@ -376,6 +376,7 @@ test {
     _ = @import("Screen.zig");
     _ = @import("Source.zig");
     _ = @import("Terminal.zig");
+    _ = @import("Track.zig");
     _ = @import("color.zig");
     _ = @import("sprite.zig");
 }
