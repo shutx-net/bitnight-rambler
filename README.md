@@ -72,6 +72,9 @@ ramblers/cat/
 └── ...
 ```
 
+Only `manifest.json` and the `.sprite` files are embedded; the build
+ignores anything else in the directory, such as a README or credits.
+
 While drawing, run it straight from the directory, without rebuilding:
 
 ```sh
