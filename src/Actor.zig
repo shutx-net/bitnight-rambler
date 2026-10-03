@@ -235,3 +235,37 @@ test "frames follow the direction of travel" {
     for (0..4) |_| a.update(tick_us, 40);
     try testing.expect(first.ptr != a.frame().sprite.pixels.ptr);
 }
+
+test "ramblers without run, sleep or jump move as they always have" {
+    // Fingerprints of the exact position, the frame and its direction on
+    // every tick, recorded before the actor could run, sleep or jump. If
+    // one changes, existing ramblers no longer take the same stroll for
+    // the same --seed.
+    const cases = [_]struct { idle: bool, mode: Mode, seed: u64, ticks: usize, fingerprint: u64 }{
+        .{ .idle = true, .mode = .roam, .seed = 42, .ticks = 9000, .fingerprint = 0xd31b78aefaa5e895 },
+        .{ .idle = false, .mode = .roam, .seed = 7, .ticks = 9000, .fingerprint = 0x1afb2c5fdcb130b6 },
+        .{ .idle = false, .mode = .once, .seed = 1, .ticks = 600, .fingerprint = 0x187de2d4991f9ec4 },
+        .{ .idle = false, .mode = .once, .seed = 2, .ticks = 600, .fingerprint = 0x310615ac71d64aac },
+    };
+    for (cases) |case| {
+        const rambler = testRambler(case.idle);
+        var cols: u16 = 60;
+        var a: Actor = .init(&rambler, case.mode, case.seed, cols);
+        var hasher: std.hash.Wyhash = .init(0);
+        for (0..case.ticks) |tick| {
+            // Every 6 seconds, widen the screen or narrow it under the rambler.
+            if (tick % 180 == 179) {
+                cols = if (cols == 90) 30 else 90;
+                a.resize(cols);
+            }
+            a.update(tick_us, cols);
+            const f = a.frame();
+            hasher.update(std.mem.asBytes(&a.x));
+            hasher.update(f.sprite.pixels);
+            hasher.update(&.{ @intFromBool(f.mirror), @intFromBool(a.done) });
+            if (a.done) break;
+        }
+        try testing.expect(a.done == (case.mode == .once));
+        try testing.expectEqual(case.fingerprint, hasher.final());
+    }
+}
