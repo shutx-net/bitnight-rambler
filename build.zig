@@ -68,7 +68,6 @@ fn embedRamblers(b: *std.Build) *std.Build.Module {
 
         w.print("    .{{ .id = \"{s}\", .files = &.{{\n", .{id}) catch @panic("OOM");
         for (sortedNames(b, dir, .file)) |name| {
-            if (!isAsset(name)) continue;
             const sub_path = b.fmt("{s}/{s}", .{ id, name });
             _ = wf.addCopyFile(b.path(b.fmt("ramblers/{s}", .{sub_path})), sub_path);
             w.print("        .{{ .name = \"{s}\", .data = @embedFile(\"{s}\") }},\n", .{ name, sub_path }) catch @panic("OOM");
@@ -86,14 +85,18 @@ fn isAsset(name: []const u8) bool {
 
 /// Returns the names of the entries of `kind` in `dir`, sorted so that the
 /// generated module (and `rambit list`) is deterministic. Hidden entries are
-/// skipped. Names end up inside string literals, so they are restricted to a
-/// conservative character set.
+/// skipped, and so are files other than assets: they are never embedded, so
+/// they may be called anything. The names that are kept end up in string
+/// literals and file paths, so they are restricted to a conservative
+/// character set (escaping would not do: `addCopyFile` takes `\` for a path
+/// separator).
 fn sortedNames(b: *std.Build, dir: std.Io.Dir, kind: std.Io.File.Kind) []const []const u8 {
     const io = b.graph.io;
     var names: std.ArrayList([]const u8) = .empty;
     var it = dir.iterate();
     while (it.next(io) catch |err| std.process.fatal("unable to scan ramblers/: {t}", .{err})) |entry| {
         if (entry.kind != kind or entry.name[0] == '.') continue;
+        if (kind == .file and !isAsset(entry.name)) continue;
         for (entry.name) |c| switch (c) {
             'a'...'z', 'A'...'Z', '0'...'9', '-', '_', '.' => {},
             else => std.process.fatal("unsupported file name in ramblers/: '{s}'", .{entry.name}),
