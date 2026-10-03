@@ -1,0 +1,14 @@
+{
+  "extraKnownMarketplaces": {
+    "shutx-skills": {
+      "source": {
+        "source": "github",
+        "repo": "shutx-net/skills"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "impl@shutx-skills": true,
+    "commit-message@shutx-skills": true
+  }
+}
