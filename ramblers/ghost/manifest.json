@@ -13,7 +13,8 @@
   },
   "animations": {
     "idle": { "frames": ["float-0", "float-1", "float-2", "float-3", "float-0", "float-1", "blink", "float-1"], "frame_ms": 220 },
-    "walk": { "frames": ["float-0", "float-1", "float-2", "float-3"], "frame_ms": 180 }
+    "walk": { "frames": ["float-0", "float-1", "float-2", "float-3"], "frame_ms": 180 },
+    "sleep": { "frames": ["blink", "sleep-0"], "frame_ms": 1000 }
   },
   "motion": { "speed": 6 }
 }
