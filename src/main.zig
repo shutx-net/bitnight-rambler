@@ -339,7 +339,10 @@ fn lessThan(_: void, a: []const u8, b: []const u8) bool {
 /// running the animation (in a pull request, say).
 fn preview(arena: Allocator, io: Io, r: *const Rambler, mode: color.Mode, stdout: *Writer) !void {
     try stdout.print("{s} ({s}){s}{s}\n", .{ r.name, r.id, if (r.description.len != 0) ": " else "", r.description });
-    try stdout.print("{d}x{d} pixels, facing {t}, {d} px/s\n", .{ r.width, r.height, r.facing, r.speed });
+    try stdout.print("{d}x{d} pixels, facing {t}, {d} px/s", .{ r.width, r.height, r.facing, r.speed });
+    if (r.animations.get(.run) != null) try stdout.print(", running {d} px/s", .{r.run_speed});
+    if (r.animations.get(.jump) != null) try stdout.print(", jumping {d} px", .{r.jump_height});
+    try stdout.writeByte('\n');
 
     const gap = 2;
     const term_cols: usize = if (try Io.File.stdout().isTty(io)) Terminal.size(io).cols else 80;

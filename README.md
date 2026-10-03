@@ -96,9 +96,12 @@ rambit validate ramblers/cat    # what is wrong, with file:line:column
   "palette": { "k": "#3b2730", "o": "#f2a65a", "w": "#ffe9c7" },
   "animations": {
     "idle": { "frames": ["idle-0", "idle-1"], "frame_ms": 400 },
-    "walk": { "frames": ["walk-0", "walk-1", "walk-2", "walk-3"], "frame_ms": 140 }
+    "walk": { "frames": ["walk-0", "walk-1", "walk-2", "walk-3"], "frame_ms": 140 },
+    "run": { "frames": ["run-0", "run-1"], "frame_ms": 110 },
+    "sleep": { "frames": ["sleep-0", "sleep-1"], "frame_ms": 800 },
+    "jump": { "frames": ["run-1", "run-0"], "frame_ms": 120 }
   },
-  "motion": { "speed": 9 }
+  "motion": { "speed": 9, "run_speed": 20, "jump_height": 6 }
 }
 ```
 
@@ -110,14 +113,22 @@ rambit validate ramblers/cat    # what is wrong, with file:line:column
 | `width`, `height` | yes   | Size of every frame in pixels, 1 to 64. |
 | `facing`       | no       | `right` (default) or `left`: the direction the frames are drawn facing. They are mirrored automatically for the other direction. |
 | `palette`      | yes      | Single-character symbols mapped to `#rrggbb` colors. |
-| `animations`   | yes      | `idle` and `walk` are used today; `run`, `sleep` and `jump` are accepted for later. At least one of `idle` or `walk` is required, and each falls back to the other. |
+| `animations`   | yes      | `idle`, `walk`, `run`, `sleep` and `jump`. At least one of `idle` or `walk` is required, and each falls back to the other; the others are optional. |
 | `frames`       | yes      | Sprite file names without `.sprite`. Repeat a name to hold a frame longer. |
 | `frame_ms`     | no       | Milliseconds per frame, 20 to 10000. Defaults to 150. |
 | `motion.speed` | no       | Pixels (terminal columns) per second, 1 to 64. Defaults to 8. |
+| `motion.run_speed` | no   | Pixels per second while running, 1 to 64. Defaults to twice `speed`, at most 64. |
+| `motion.jump_height` | no | How high a jump goes, in pixels, 1 to 64. Defaults to half the `height`, at least 1. |
 
-`walk` plays while the rambler moves, and `idle` while it rests. A rambler
-does not need legs: the slime hops and the ghost floats through the same
-`walk` animation.
+`walk` plays while the rambler moves, and `idle` while it rests. The other
+three are optional, and a rambler only does what it has an animation for:
+with `run` it sets off at `run_speed` now and then, with `sleep` some rests
+end in a longer nap, and with `jump` it sometimes leaps `jump_height`
+pixels up while on the move. `jump` starts from its first frame at every
+takeoff and holds its last frame until the rambler lands. Without `idle` a
+rambler never rests, but with `sleep` it still stops for the odd nap. With
+`--once`, ramblers only walk. A rambler does not need legs: the slime hops
+and the ghost floats through the same `walk` animation.
 
 ### Sprites
 
@@ -141,7 +152,8 @@ line and column of JSON errors), required and unknown fields, value ranges,
 frame dimensions, palette symbols, missing frame files, frame names, ids
 that do not match their directory or clash with a command or another
 rambler, and file size limits. Sprite files no animation uses produce a
-warning.
+warning, as do `motion.run_speed` without a `run` animation and
+`motion.jump_height` without a `jump` animation.
 
 CI runs `zig build validate` and `zig build test` on every pull request
 and every push to `main`, so a pull request shows these problems before
@@ -154,9 +166,9 @@ it is merged.
   foreground and background colors. Only cells that changed since the last
   frame are written.
 - **Movement and animation are separate.** The movement logic decides where
-  to go and whether to walk or rest; the rambler provides the frames.
-  Movement advances in fixed 30 Hz steps from a seeded random number
-  generator, so a run is reproducible.
+  to go and whether to walk, run, jump, rest or sleep; the rambler provides
+  the frames. Movement advances in fixed 30 Hz steps from a seeded random
+  number generator, so a run is reproducible.
 - **Terminal handling.** Raw input, the alternate screen, a hidden cursor
   and no line wrapping while running. The terminal is restored on exit,
   including on `SIGINT`, `SIGTERM`, `SIGHUP` and panics. Resizes are picked
@@ -168,7 +180,7 @@ it is merged.
 src/
 ├── main.zig         CLI: play, list, preview, validate
 ├── play.zig         the animation loop
-├── Actor.zig        movement: walking, resting, turning around
+├── Actor.zig        movement: walking, running, jumping, resting, sleeping
 ├── Rambler.zig      manifest parsing and validation
 ├── sprite.zig       sprite file parsing
 ├── Source.zig       embedded files or a directory on disk
@@ -182,6 +194,5 @@ src/
 ## Not yet
 
 - Ramblers only walk along the bottom edge.
-- `run`, `sleep` and `jump` animations are accepted but not used.
 - A pseudo-terminal mode where ramblers share the screen with your shell,
   as described in the abstract, is a later-stage feature.

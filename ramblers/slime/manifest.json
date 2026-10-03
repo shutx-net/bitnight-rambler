@@ -13,7 +13,9 @@
   },
   "animations": {
     "idle": { "frames": ["idle-0", "idle-0", "hop-0", "idle-0", "idle-0", "blink"], "frame_ms": 300 },
-    "walk": { "frames": ["hop-0", "hop-1", "hop-2", "hop-2", "hop-3"], "frame_ms": 110 }
+    "walk": { "frames": ["hop-0", "hop-1", "hop-2", "hop-2", "hop-3"], "frame_ms": 110 },
+    "sleep": { "frames": ["sleep-0", "blink"], "frame_ms": 900 },
+    "jump": { "frames": ["hop-0", "hop-1"], "frame_ms": 100 }
   },
   "motion": { "speed": 7 }
 }
