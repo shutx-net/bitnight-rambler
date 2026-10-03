@@ -1,7 +1,7 @@
 {
   "id": "slime",
   "name": "Slime",
-  "description": "A cheerful blob that hops along without a single leg to its name.",
+  "description": "A cheerful blob that hops along without a single leg to its name, and sticks to walls and ceilings alike.",
   "width": 14,
   "height": 12,
   "facing": "right",
@@ -16,6 +16,18 @@
     "walk": { "frames": ["hop-0", "hop-1", "hop-2", "hop-2", "hop-3"], "frame_ms": 110 },
     "sleep": { "frames": ["sleep-0", "blink"], "frame_ms": 900 },
     "jump": { "frames": ["hop-0", "hop-1"], "frame_ms": 100 }
+  },
+  "wall_animations": {
+    "idle": { "frames": ["wall-idle-0", "wall-idle-0", "wall-hop-0", "wall-idle-0", "wall-idle-0", "wall-blink"], "frame_ms": 300 },
+    "walk": { "frames": ["wall-hop-0", "wall-hop-1", "wall-hop-2", "wall-hop-2", "wall-hop-3"], "frame_ms": 110 },
+    "sleep": { "frames": ["wall-sleep-0", "wall-blink"], "frame_ms": 900 },
+    "jump": { "frames": ["wall-hop-0", "wall-hop-1"], "frame_ms": 100 }
+  },
+  "ceiling_animations": {
+    "idle": { "frames": ["ceiling-idle-0", "ceiling-idle-0", "ceiling-hop-0", "ceiling-idle-0", "ceiling-idle-0", "ceiling-blink"], "frame_ms": 300 },
+    "walk": { "frames": ["ceiling-hop-0", "ceiling-hop-1", "ceiling-hop-2", "ceiling-hop-2", "ceiling-hop-3"], "frame_ms": 110 },
+    "sleep": { "frames": ["ceiling-sleep-0", "ceiling-blink"], "frame_ms": 900 },
+    "jump": { "frames": ["ceiling-hop-0", "ceiling-hop-1"], "frame_ms": 100 }
   },
   "motion": { "speed": 7 }
 }
