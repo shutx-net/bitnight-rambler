@@ -402,6 +402,7 @@ test {
     _ = @import("Track.zig");
     _ = @import("color.zig");
     _ = @import("sprite.zig");
+    _ = @import("vt/vt.zig");
 }
 
 test parseArgs {
