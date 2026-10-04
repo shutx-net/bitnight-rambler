@@ -18,10 +18,10 @@ pub const Options = struct {
 };
 
 /// About 30 frames per second.
-const tick_us = 33_333;
+pub const tick_us = 33_333;
 /// After a stall, such as the process being suspended, skip ahead instead
 /// of fast-forwarding through everything that was missed.
-const max_catch_up_ticks = 10;
+pub const max_catch_up_ticks = 10;
 
 pub fn play(gpa: Allocator, io: Io, rambler: *const Rambler, options: Options) !void {
     var out_buffer: [64 * 1024]u8 = undefined;

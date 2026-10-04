@@ -23,8 +23,9 @@ zig build validate                 # rambit validate ramblers
 zig build -Doptimize=ReleaseSmall  # a standalone binary of under 300 KB
 ```
 
-Tested on Linux. It also builds for macOS, but has not been tried there
-yet. Windows is not supported yet.
+Tested on Linux. CI also runs the tests on macOS, the pseudo-terminal
+ones included, but rambit has not been tried there by hand yet. Native
+Windows is not supported; under WSL it runs as on Linux.
 
 ### With Nix
 
@@ -48,6 +49,9 @@ rambit ghost --seed 42  # the same seed gives the same stroll
 rambit list             # the built-in ramblers
 rambit preview cat      # print every frame, e.g. to review a pull request
 rambit validate         # check the built-in ramblers, or given directories
+rambit shell            # your shell, with a rambler roaming over it
+rambit shell slime      # the same, starting with the slime
+rambit shell -- top     # a command instead of the shell
 ```
 
 | Option           | Meaning                                                      |
@@ -58,6 +62,92 @@ rambit validate         # check the built-in ramblers, or given directories
 
 A rambler runs on the alternate screen, like `less` or `vim`, so your
 terminal looks exactly as before once it leaves.
+
+### Your shell, with a rambler
+
+`rambit shell` runs your shell (`$SHELL`, or `/bin/sh` without one), or
+the command after `--`, on a pseudo-terminal, the way tmux and screen do.
+It keeps the program's screen itself, draws the rambler over it and
+writes only the cells that changed. When the program exits, so does
+rambit, with the program's exit status: 128 plus the signal's number if
+it was killed by a signal. A command that cannot be run is reported
+before the screen changes, with status 127 if it was not found and 126
+otherwise, as a shell would.
+
+The session runs on the alternate screen, so what it showed is gone when
+it ends and your terminal looks as it did before. There is no
+scrollback: as in tmux, what scrolls off the top is lost, and your
+terminal's own scroll bar never sees it.
+
+`--seed` and `--color` work as they do for `rambit <name>`; `--once`
+does not apply. Every key goes to the program, Ctrl-C and Esc included,
+except Ctrl-] followed by a command key:
+
+| Keys              | Effect                                                 |
+| ----------------- | ------------------------------------------------------ |
+| `Ctrl-]` `h`      | Hide or show the rambler.                              |
+| `Ctrl-]` `n`      | Bring in the next rambler.                             |
+| `Ctrl-]` `Ctrl-]` | Send Ctrl-] to the program.                            |
+
+The rambler you name, or else the first built-in, comes first, and
+`Ctrl-]` `n` goes on through the other built-ins and round again. Any
+other key after Ctrl-] is swallowed, arrow keys and Alt combinations
+included. Ctrl-] is telnet's escape key. It takes away no shell binding,
+unlike tmux's Ctrl-b and screen's Ctrl-a, which readline and emacs use;
+vim follows tags with it, which still works by pressing it twice. Text pasted while the program has bracketed paste on passes
+through untouched, Ctrl-] included.
+
+The rambler roams its edges over the text as usual, but stays off the
+cursor's row so that it never covers what you type. For two
+seconds after a key press it also keeps two rows clear above and below
+the cursor. With the cursor on the bottom row, a rambler that climbs
+comes in at a corner and goes up the wall; one that only walks the floor
+waits off screen until there is room.
+
+Inside the session `RAMBIT_SHELL=1` is set, and `rambit shell` refuses
+to start where it is set, rather than nest.
+
+#### How the shell mode works
+
+- **`TERM=xterm-256color`.** Keys are passed on exactly as your terminal
+  sends them, and that is almost always an xterm-compatible terminal, so
+  the program is told it is in one. The emulator implements what that
+  terminfo entry advertises: background color erase, ECH, REP, scroll
+  regions, inserting and deleting lines and characters, italics, the 1049
+  alternate screen and DEC line drawing. `LINES` and `COLUMNS` are
+  removed so that the pty's size counts. `COLORTERM` is passed through,
+  and 24-bit colors become the nearest of 256 when rambit itself uses 256
+  colors (see `--color`).
+- **Modes and replies.** The cursor key, keypad and bracketed paste modes
+  the program sets are mirrored to your terminal, and reset when rambit
+  exits. Status, cursor position and device attribute queries (DSR, DA)
+  are answered, and the bell passes through. Mouse reporting, focus
+  events and synchronized output are ignored, and so are OSC, DCS and APC
+  strings such as window titles and hyperlinks.
+- **Wide characters.** East Asian wide and fullwidth characters take two
+  cells, per a table that `tools/width_table.py` generates from Python's
+  `unicodedata` (Unicode 14.0), with the few extra wide ranges glibc has,
+  so that it agrees with glibc's `wcwidth` up to Unicode 14.
+  Ambiguous-width characters take one cell, and combining marks are
+  dropped. After any non-ASCII character rambit moves the real cursor
+  explicitly, so a terminal that disagrees about a width cannot shift the
+  rest of the row.
+- **Parsing.** The parser follows Paul Williams' state machine for DEC
+  terminals and decodes UTF-8, showing U+FFFD for malformed bytes. Bytes
+  0x80 to 0x9F are never taken as C1 controls.
+- **Resizing.** A new size is passed on to the pty, and the kernel tells
+  the program with `SIGWINCH`. Nothing reflows; the cursor's row stays in
+  view, so a prompt at the bottom stays at the bottom.
+- **Throughput.** The pty is read as fast as the program writes, and the
+  screen is drawn at most 30 times a second, so `cat` of a large file is
+  not held up by the terminal.
+- **Leaving.** On `SIGINT`, `SIGTERM` or `SIGHUP` rambit hangs up on the
+  program, as a closing terminal window would, and kills it if it is
+  still there a few seconds later.
+- **Platforms.** On Linux, rambit opens `/dev/ptmx` with ioctls and needs
+  no libc. On macOS it uses `posix_openpt` and friends from libSystem,
+  which every macOS program links, and waits with `select(2)`, since
+  `poll(2)` does not work with terminals there.
 
 ## Adding a rambler
 
@@ -224,30 +314,54 @@ it is merged.
   into one line of positions, so climbing a wall is just going further
   along it. Each frame is then placed against the edge the position lies
   on, and flipped to face the way it is going.
+- **Shell mode.** `rambit shell` puts the program on a pseudo-terminal,
+  feeds what it writes to a terminal emulator of its own (`src/vt/`),
+  lays the rambler's pixels over the emulator's cells and writes the
+  cells that changed. The rambler is kept out of the rows around the
+  cursor. See [How the shell mode works](#how-the-shell-mode-works).
 - **Terminal handling.** Raw input, the alternate screen, a hidden cursor
   and no line wrapping while running. The terminal is restored on exit,
-  including on `SIGINT`, `SIGTERM`, `SIGHUP` and panics. Resizes are picked
-  up through `SIGWINCH`.
+  including on `SIGINT`, `SIGTERM`, `SIGHUP` and panics. Leaving
+  `rambit shell` also resets the keyboard modes passed on from the
+  program. Resizes are picked up through `SIGWINCH`.
 - **Single binary.** `build.zig` scans `ramblers/` and generates a module
   that embeds every manifest and sprite with `@embedFile`.
 
 ```text
 src/
-├── main.zig         CLI: play, list, preview, validate
-├── play.zig         the animation loop
-├── Actor.zig        movement: walking, climbing, running, jumping, resting, sleeping
-├── Track.zig        the edges as one line, and where frames go
-├── Rambler.zig      manifest parsing and validation
-├── sprite.zig       sprite file parsing
-├── Source.zig       embedded files or a directory on disk
-├── Diagnostics.zig  problems collected by the validator
-├── Canvas.zig       the logical pixel framebuffer
-├── Screen.zig       pixels to cells, and cells to escape sequences
-├── Terminal.zig     raw mode, alternate screen, signals, terminal size
-└── color.zig        colors, palettes, 256-color fallback
+├── main.zig             CLI: play, shell, list, preview, validate
+├── play.zig             the animation loop
+├── shell.zig            the shell loop: pty, emulator, keys and rambler
+├── Actor.zig            movement: walking, climbing, running, jumping, resting, sleeping
+├── Track.zig            the edges as one line, and where frames go
+├── Rambler.zig          manifest parsing and validation
+├── sprite.zig           sprite file parsing
+├── Source.zig           embedded files or a directory on disk
+├── Diagnostics.zig      problems collected by the validator
+├── Canvas.zig           the logical pixel framebuffer
+├── Screen.zig           pixels to cells, and cells to escape sequences
+├── compose.zig          a rambler's pixels laid over the emulator's cells
+├── Display.zig          changed emulator cells to escape sequences
+├── Pty.zig              a pseudo-terminal with the child process on it
+├── Prefix.zig           the Ctrl-] keys, filtered out of the input
+├── poll.zig             waiting on the keyboard and the pty
+├── Terminal.zig         raw mode, alternate screen, signals, terminal size
+├── color.zig            colors, palettes, 256-color fallback
+└── vt/                  the terminal emulator
+    ├── vt.zig           the package
+    ├── Parser.zig       escape sequences and UTF-8, byte by byte
+    ├── Emulator.zig     the program's screens, cursor, modes and replies
+    ├── Grid.zig         one screen of cells and its editing operations
+    ├── width.zig        how many cells a character takes up
+    └── width_table.zig  generated by tools/width_table.py
+tools/
+└── width_table.py       the width table, from Python's unicodedata
 ```
 
 ## Not yet
 
-- A pseudo-terminal mode where ramblers share the screen with your shell,
-  as described in the abstract, is a later-stage feature.
+- Scrollback in `rambit shell`.
+- Mouse reporting, window titles and hyperlinks (OSC) in `rambit shell`.
+- Combining characters and emoji sequences.
+- More than one rambler at a time.
+- A configurable prefix key.
