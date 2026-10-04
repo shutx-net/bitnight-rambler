@@ -12,6 +12,14 @@
 //! Running, sleeping and jumping are up to the rambler: the actor only does
 //! them with the animation for it, and draws no random numbers for them
 //! otherwise, so that ramblers without them move as they always have.
+//!
+//! A roaming rambler can be kept out of a band of rows (see `setKeepOut`),
+//! such as the one holding a terminal's cursor. It then only heads for
+//! spots it can reach without crossing the band and steps aside when the
+//! band comes to cover it. With the floor in the way it comes in by the
+//! corner and up a wall if it can, and otherwise waits off screen until
+//! there is somewhere to go. Without a band nothing changes, down to the
+//! random numbers drawn.
 
 const Actor = @This();
 
@@ -39,6 +47,12 @@ done: bool = false,
 /// Coming in from off screen along the bottom edge, whatever edges the
 /// rambler walks; cleared on first arrival.
 entering: bool = true,
+/// Rows the rambler stays out of while roaming; see `setKeepOut`.
+keep_out: ?KeepOut = null,
+
+/// Rows of the canvas, in pixels from the top, to stay out of: from `top`
+/// up to but not including `bottom`. They span the whole width.
+pub const KeepOut = struct { top: i32, bottom: i32 };
 
 pub const Field = Track.Field;
 
@@ -188,6 +202,7 @@ pub fn resize(a: *Actor, field: Field) void {
                 .resting, .sleeping => a.position < t.start() or a.position > t.end(),
             };
             if (out_of_bounds) a.setOff();
+            if (a.keep_out != null) a.avoid();
         },
     }
 }
@@ -273,6 +288,7 @@ fn arrive(a: *Actor) void {
     a.entering = false;
     // Keep positions on a loop within bounds; elsewhere this changes nothing.
     a.position = a.track().wrap(a.position);
+    if (a.keep_out != null and a.blocked(a.track(), a.position, 0)) return a.stepAside();
     const random = a.prng.random();
     if (a.can(.idle)) {
         if (random.float(f32) < rest_chance) return a.rest(random.intRangeAtMost(u64, min_rest_us, max_rest_us));
@@ -297,6 +313,7 @@ fn fallAsleep(a: *Actor) void {
 
 /// Heads for a random spot, at a run now and then.
 fn setOff(a: *Actor) void {
+    if (a.keep_out != null and a.mode == .roam) return a.setOffAvoiding();
     const target = a.randomTarget();
     a.walkTo(target, a.can(.run) and a.prng.random().float(f32) < run_chance);
 }
@@ -324,6 +341,7 @@ fn takesOff(a: *Actor, target: f32, running: bool, dt_us: u64) bool {
     if (@abs(target - a.position) < reach) return false;
     // None along the bottom alone, so this changes nothing there.
     if (a.track().cornerAhead(a.position, a.direction)) |room| if (room < reach) return false;
+    if (a.keep_out != null and a.blocked(a.track(), a.position, a.rambler.jump_height)) return false;
     return a.prng.random().uintLessThan(u64, mean_jump_interval_us) < dt_us;
 }
 
@@ -374,6 +392,128 @@ fn randomTarget(a: *Actor) f32 {
         if (@abs(offset) >= min_distance) break;
     }
     return a.position + offset;
+}
+
+/// Keeps the rambler out of `keep_out`, or lets it go anywhere again with
+/// null. While roaming it steps aside from rows that come to cover it, and
+/// only heads for spots it can reach without crossing them. Draws no random
+/// numbers while there are none, so the rambler then moves as it always has.
+pub fn setKeepOut(a: *Actor, keep_out: ?KeepOut) void {
+    if (std.meta.eql(a.keep_out, keep_out)) return;
+    a.keep_out = keep_out;
+    if (keep_out != null) a.avoid();
+}
+
+/// Reacts to a new keep-out, or to a resize under one: steps aside if it
+/// covers the rambler, and picks a new target if the old one is cut off.
+fn avoid(a: *Actor) void {
+    if (a.mode != .roam) return;
+    const t = a.track();
+    if (a.entering) {
+        const walking = switch (a.state) {
+            .walking => |walking| walking,
+            else => return,
+        };
+        if (a.reachable(t, walking.target)) return;
+        // The floor is in the way: hurry in to the corner and up the wall,
+        // or wait off screen without one.
+        const from_left = a.position < walking.target;
+        if (a.rambler.edges.contains(if (from_left) .left else .right)) {
+            return a.walkTo(if (from_left) 0 else t.floor, a.can(.run));
+        }
+        return a.walkTo(a.position, false);
+    }
+    if (a.blocked(t, a.position, 0)) return a.stepAside();
+    switch (a.state) {
+        .walking => |walking| if (!a.reachable(t, walking.target)) a.setOff(),
+        .resting, .sleeping => {},
+    }
+}
+
+/// `setOff` under a keep-out: a random spot within the free stretch the
+/// rambler is on, kept as far off as `randomTarget` keeps its targets.
+fn setOffAvoiding(a: *Actor) void {
+    const t = a.track();
+    if (a.blocked(t, a.position, 0)) return a.stepAside();
+    const span = a.freeSpan(t) orelse {
+        const target = a.randomTarget();
+        return a.walkTo(target, a.can(.run) and a.prng.random().float(f32) < run_chance);
+    };
+    const random = a.prng.random();
+    const length = span.hi - span.lo;
+    const min_distance = @min(length / 3, 24);
+    var target: f32 = a.position;
+    for (0..8) |_| {
+        target = span.lo + @min(length, @floor(random.float(f32) * (length + 1)));
+        if (@abs(target - a.position) >= min_distance) break;
+    }
+    a.walkTo(target, a.can(.run) and random.float(f32) < run_chance);
+}
+
+/// Heads for the nearest position out of the keep-out, wholly off screen
+/// past an open end if need be.
+fn stepAside(a: *Actor) void {
+    const t = a.track();
+    const b = a.bounds(t);
+    const steps: usize = @intFromFloat(@ceil(b.hi - b.lo) + 1);
+    for (1..steps + 1) |i| {
+        const d: f32 = @floatFromInt(i);
+        for ([_]f32{ a.position + d, a.position - d }) |p| {
+            if (p < b.lo or p > b.hi) continue;
+            if (!a.blocked(t, p, 0)) return a.walkTo(p, a.can(.run));
+        }
+    }
+    // Nowhere to go: carry on as if there were nothing to avoid.
+    const target = a.randomTarget();
+    a.walkTo(target, a.can(.run) and a.prng.random().float(f32) < run_chance);
+}
+
+const Span = struct { lo: f32, hi: f32 };
+
+/// Where positions may lie while avoiding: the track, plus room past its
+/// open ends to wait wholly off screen. Unbounded on a loop, up to a lap.
+fn bounds(a: *const Actor, t: Track) Span {
+    const extent: f32 = @floatFromInt(a.rambler.width);
+    if (t.loops()) {
+        const length = t.end() - t.start();
+        return .{ .lo = a.position - length, .hi = a.position + length };
+    }
+    return .{ .lo = @min(t.start() - extent, a.position), .hi = @max(t.end() + extent, a.position) };
+}
+
+/// The free stretch of track around the current position, which must not
+/// be blocked; null when that is the whole loop.
+fn freeSpan(a: *const Actor, t: Track) ?Span {
+    const loop = t.loops();
+    const length = t.end() - t.start();
+    const lo_bound = if (loop) a.position - length else @min(t.start(), a.position);
+    const hi_bound = if (loop) a.position + length else @max(t.end(), a.position);
+    var hi = a.position;
+    while (hi + 1 <= hi_bound and !a.blocked(t, hi + 1, 0)) hi += 1;
+    if (loop and hi - a.position >= length) return null;
+    var lo = a.position;
+    while (lo - 1 >= lo_bound and !a.blocked(t, lo - 1, 0)) lo -= 1;
+    return .{ .lo = lo, .hi = hi };
+}
+
+/// Whether the rambler can get to `target` without crossing the keep-out.
+fn reachable(a: *const Actor, t: Track, target: f32) bool {
+    if (a.blocked(t, a.position, 0)) return false;
+    const span = a.freeSpan(t) orelse return true;
+    return target >= span.lo and target <= span.hi;
+}
+
+/// Whether the sprite at position `p`, `lift_px` pixels off its edge, would
+/// be in the keep-out. Wholly off screen it is not.
+fn blocked(a: *const Actor, t: Track, p: f32, lift_px: u16) bool {
+    const k = a.keep_out orelse return false;
+    const spot = t.locate(p);
+    const upright = spot.edge.surface() == .wall;
+    const w: u16 = if (upright) a.rambler.height else a.rambler.width;
+    const h: u16 = if (upright) a.rambler.width else a.rambler.height;
+    const at = Track.place(a.field, spot.edge, @intFromFloat(@floor(spot.along)), lift_px, .{ .width = w, .height = h, .pixels = "" });
+    if (at.x + w <= 0 or at.x >= a.field.width or at.y + h <= 0 or at.y >= a.field.height) return false;
+    return at.y < k.bottom and at.y + h > k.top;
 }
 
 const testing = std.testing;
@@ -1023,6 +1163,94 @@ test "a resize calls a climber back past an open end" {
     try testing.expect(a.state.walking.target >= a.track().start() and a.state.walking.target <= 26);
 }
 
+fn inKeepOut(f: Frame, k: KeepOut, field: Field) bool {
+    const h: i32 = f.sprite.height;
+    const w: i32 = f.sprite.width;
+    if (f.x + w <= 0 or f.x >= field.width or f.y + h <= 0 or f.y >= field.height) return false;
+    return f.y < k.bottom and f.y + h > k.top;
+}
+
+test "no keep-out changes nothing" {
+    const rambler = testClimber(&all_round, every_kind, every_kind, every_kind);
+    var a: Actor = .init(&rambler, .roam, 42, test_field);
+    var b: Actor = .init(&rambler, .roam, 42, test_field);
+    for (0..5000) |_| {
+        b.setKeepOut(null);
+        a.update(tick_us);
+        b.update(tick_us);
+        try testing.expectEqual(a.position, b.position);
+        try testing.expectEqual(a.frame(), b.frame());
+    }
+}
+
+test "ramblers stay out of the keep-out" {
+    const rambler = testClimber(&all_round, every_kind, every_kind, every_kind);
+    const k: KeepOut = .{ .top = 36, .bottom = 40 };
+    for (0..10) |seed| {
+        var a: Actor = .init(&rambler, .roam, seed, test_field);
+        a.setKeepOut(k);
+        var clear = false;
+        var visited: std.EnumSet(Rambler.Edge) = .initEmpty();
+        for (0..20_000) |tick| {
+            a.update(tick_us);
+            const f = a.frame();
+            const inside = inKeepOut(f, k, test_field);
+            if (clear) try testing.expect(!inside);
+            if (!inside and !a.entering) clear = true;
+            if (clear) visited.insert(f.edge);
+            if (tick == 2000) try testing.expect(clear);
+        }
+        try testing.expect(visited.contains(.top) and !visited.contains(.bottom));
+    }
+}
+
+test "ramblers step aside" {
+    const rambler = testClimber(&all_round, every_kind, every_kind, every_kind);
+    for (0..10) |seed| {
+        var a: Actor = .init(&rambler, .roam, seed, test_field);
+        for (0..3000) |_| a.update(tick_us);
+        const f = a.frame();
+        const k: KeepOut = .{ .top = f.y - 2, .bottom = f.y + 2 };
+        a.setKeepOut(k);
+        var ticks: usize = 0;
+        while (inKeepOut(a.frame(), k, test_field)) : (ticks += 1) {
+            a.update(tick_us);
+            try testing.expect(ticks < 400);
+        }
+        for (0..10_000) |_| {
+            a.update(tick_us);
+            try testing.expect(!inKeepOut(a.frame(), k, test_field));
+        }
+    }
+}
+
+test "floor-only ramblers wait off screen" {
+    const rambler = testRamblerWith(true, &.{ .run, .sleep, .jump });
+    const k: KeepOut = .{ .top = 38, .bottom = 40 };
+    for (0..10) |seed| {
+        var a: Actor = .init(&rambler, .roam, seed, test_field);
+        for (0..1000) |_| a.update(tick_us);
+        a.setKeepOut(k);
+        var ticks: usize = 0;
+        while (inKeepOut(a.frame(), k, test_field)) : (ticks += 1) {
+            a.update(tick_us);
+            try testing.expect(ticks < 400);
+        }
+        for (0..5000) |_| {
+            a.update(tick_us);
+            try testing.expect(!inKeepOut(a.frame(), k, test_field));
+        }
+        a.setKeepOut(.{ .top = 0, .bottom = 2 });
+        var back = false;
+        for (0..3000) |_| {
+            a.update(tick_us);
+            const f = a.frame();
+            if (f.x >= 0 and f.x + f.sprite.width <= test_field.width) back = true;
+        }
+        try testing.expect(back);
+    }
+}
+
 const Diagnostics = @import("Diagnostics.zig");
 const Source = @import("Source.zig");
 const builtin_ramblers = @import("builtin_ramblers");
@@ -1051,6 +1279,36 @@ test "every built-in rambler roams on screen" {
                 if (!a.entering and before.state == .walking and (a.state != .walking or a.state.walking.target != before.state.walking.target)) away = false;
                 if (!away) try expectPlaced(&rambler, field, a.frame());
             }
+        }
+    }
+}
+
+test "every built-in rambler stays out of the keep-out" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const field: Field = .{ .width = 80, .height = 48 };
+    const bands = [_]KeepOut{
+        .{ .top = 46, .bottom = 48 },
+        .{ .top = 42, .bottom = 48 },
+        .{ .top = 0, .bottom = 2 },
+        .{ .top = 20, .bottom = 22 },
+        .{ .top = 0, .bottom = 6 },
+    };
+    for (builtin_ramblers.entries) |entry| {
+        var diag: Diagnostics = .init(arena);
+        const rambler = try Rambler.load(arena, Source.embedded(entry), &diag);
+        for (bands) |k| {
+            var a: Actor = .init(&rambler, .roam, 5, field);
+            a.setKeepOut(k);
+            var clear = false;
+            for (0..5000) |_| {
+                a.update(tick_us);
+                const inside = inKeepOut(a.frame(), k, field);
+                if (clear) try testing.expect(!inside);
+                if (!inside and !a.entering) clear = true;
+            }
+            try testing.expect(clear);
         }
     }
 }
