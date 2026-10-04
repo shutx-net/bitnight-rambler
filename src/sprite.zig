@@ -32,14 +32,17 @@ pub const Sprite = struct {
 const max_reported = 8;
 
 /// Parses `text` as a `width`×`height` sprite. Problems are reported to
-/// `diag` against `file`; returns null if there were any. Without a
-/// `palette` (because the manifest's is invalid), any printable symbol is
-/// accepted, so that the other checks still run.
+/// `diag` against `file`; returns null if there were any. `width_source`
+/// names where `width` comes from, such as "the manifest's width", for the
+/// message about rows that are all the wrong width. Without a `palette`
+/// (because the manifest's is invalid), any printable symbol is accepted,
+/// so that the other checks still run.
 pub fn parse(
     arena: Allocator,
     text: []const u8,
     width: u16,
     height: u16,
+    width_source: []const u8,
     palette: ?*const Palette,
     diag: *Diagnostics,
     file: []const u8,
@@ -57,7 +60,7 @@ pub fn parse(
     const uniform_width = uniformRowWidth(body);
     const wrong_width = uniform_width != null and uniform_width.? != width;
     if (wrong_width) {
-        try diag.err(file, "every row is {d} pixels wide, but the manifest's width is {d}", .{ uniform_width.?, width });
+        try diag.err(file, "every row is {d} pixels wide, but {s} is {d}", .{ uniform_width.?, width_source, width });
         problems += 1;
     }
     var lines = std.mem.splitScalar(u8, body, '\n');
@@ -134,7 +137,7 @@ test "parse a valid sprite" {
     var diag: Diagnostics = .init(arena);
     const palette = testPalette();
 
-    const sprite = (try parse(arena, ".k.\r\nkok\n.k.\n\n", 3, 3, &palette, &diag, "t.sprite")).?;
+    const sprite = (try parse(arena, ".k.\r\nkok\n.k.\n\n", 3, 3, "the manifest's width", &palette, &diag, "t.sprite")).?;
     try testing.expectEqual(0, diag.items.items.len);
     try testing.expectEqual('o', sprite.at(1, 1));
     try testing.expectEqual(transparent, sprite.at(0, 0));
@@ -147,22 +150,22 @@ test "parse reports every kind of problem" {
     const palette = testPalette();
 
     var diag: Diagnostics = .init(arena);
-    try testing.expectEqual(null, try parse(arena, ".k.\nkxk\n.k\n", 3, 3, &palette, &diag, "t.sprite"));
+    try testing.expectEqual(null, try parse(arena, ".k.\nkxk\n.k\n", 3, 3, "the manifest's width", &palette, &diag, "t.sprite"));
     try testing.expectEqual(2, diag.errorCount());
     try testing.expectEqual(2, diag.items.items[0].line);
     try testing.expectEqual(2, diag.items.items[0].column);
     try testing.expectEqual(3, diag.items.items[1].line);
 
     diag = .init(arena);
-    try testing.expectEqual(null, try parse(arena, "...\n...\n...\n...\n", 3, 3, &palette, &diag, "t.sprite"));
+    try testing.expectEqual(null, try parse(arena, "...\n...\n...\n...\n", 3, 3, "the manifest's width", &palette, &diag, "t.sprite"));
     try testing.expectEqualStrings("expected 3 rows, found 4", diag.items.items[0].message);
 
     diag = .init(arena);
-    try testing.expectEqual(null, try parse(arena, "...\n", 3, 3, &palette, &diag, "t.sprite"));
+    try testing.expectEqual(null, try parse(arena, "...\n", 3, 3, "the manifest's width", &palette, &diag, "t.sprite"));
     try testing.expectEqualStrings("expected 3 rows, found 1", diag.items.items[0].message);
 
     diag = .init(arena);
-    try testing.expectEqual(null, try parse(arena, ". .\n", 3, 1, &palette, &diag, "t.sprite"));
+    try testing.expectEqual(null, try parse(arena, ". .\n", 3, 1, "the manifest's width", &palette, &diag, "t.sprite"));
     try testing.expectEqualStrings("use '.' rather than a space for transparent pixels", diag.items.items[0].message);
 }
 
@@ -172,8 +175,8 @@ test "parse without a palette still checks the shape" {
     const arena = arena_state.allocator();
     var diag: Diagnostics = .init(arena);
 
-    try testing.expect(try parse(arena, "xy\nzw\n", 2, 2, null, &diag, "t.sprite") != null);
-    try testing.expectEqual(null, try parse(arena, "xy\nz\n", 2, 2, null, &diag, "t.sprite"));
+    try testing.expect(try parse(arena, "xy\nzw\n", 2, 2, "the manifest's width", null, &diag, "t.sprite") != null);
+    try testing.expectEqual(null, try parse(arena, "xy\nz\n", 2, 2, "the manifest's width", null, &diag, "t.sprite"));
     try testing.expectEqual(1, diag.errorCount());
 }
 
@@ -184,20 +187,20 @@ test "parse reports rows that are all the wrong width once" {
     const palette = testPalette();
 
     var diag: Diagnostics = .init(arena);
-    try testing.expectEqual(null, try parse(arena, "k..k\r\n.oo.\r\nk..k\r\n", 3, 3, &palette, &diag, "t.sprite"));
+    try testing.expectEqual(null, try parse(arena, "k..k\r\n.oo.\r\nk..k\r\n", 3, 3, "the manifest's width", &palette, &diag, "t.sprite"));
     try testing.expectEqual(1, diag.items.items.len);
     try testing.expectEqual(0, diag.items.items[0].line);
     try testing.expectEqualStrings("every row is 4 pixels wide, but the manifest's width is 3", diag.items.items[0].message);
 
     diag = .init(arena);
-    try testing.expectEqual(null, try parse(arena, "k..k\n.oo.\n", 3, 3, &palette, &diag, "t.sprite"));
+    try testing.expectEqual(null, try parse(arena, "k..k\n.oo.\n", 3, 3, "the manifest's width", &palette, &diag, "t.sprite"));
     try testing.expectEqual(2, diag.items.items.len);
     try testing.expectEqualStrings("every row is 4 pixels wide, but the manifest's width is 3", diag.items.items[0].message);
     try testing.expectEqualStrings("expected 3 rows, found 2", diag.items.items[1].message);
     try testing.expectEqual(0, diag.items.items[1].line);
 
     diag = .init(arena);
-    try testing.expectEqual(null, try parse(arena, "k..k\n.oo.\nk..k\n.oo.\n", 3, 3, &palette, &diag, "t.sprite"));
+    try testing.expectEqual(null, try parse(arena, "k..k\n.oo.\nk..k\n.oo.\n", 3, 3, "the manifest's width", &palette, &diag, "t.sprite"));
     try testing.expectEqual(2, diag.items.items.len);
     try testing.expectEqualStrings("expected 3 rows, found 4", diag.items.items[1].message);
     try testing.expectEqual(4, diag.items.items[1].line);
@@ -210,7 +213,7 @@ test "parse reports uneven rows and a single row one by one" {
     const palette = testPalette();
 
     var diag: Diagnostics = .init(arena);
-    try testing.expectEqual(null, try parse(arena, "k..k\nkk\nk..k\n", 3, 3, &palette, &diag, "t.sprite"));
+    try testing.expectEqual(null, try parse(arena, "k..k\nkk\nk..k\n", 3, 3, "the manifest's width", &palette, &diag, "t.sprite"));
     try testing.expectEqual(3, diag.items.items.len);
     try testing.expectEqual(1, diag.items.items[0].line);
     try testing.expectEqual(2, diag.items.items[1].line);
@@ -218,7 +221,7 @@ test "parse reports uneven rows and a single row one by one" {
     try testing.expectEqualStrings("expected 3 pixels in this row, found 2", diag.items.items[1].message);
 
     diag = .init(arena);
-    try testing.expectEqual(null, try parse(arena, "k..k\n", 3, 1, &palette, &diag, "t.sprite"));
+    try testing.expectEqual(null, try parse(arena, "k..k\n", 3, 1, "the manifest's width", &palette, &diag, "t.sprite"));
     try testing.expectEqual(1, diag.items.items.len);
     try testing.expectEqual(1, diag.items.items[0].line);
     try testing.expectEqualStrings("expected 3 pixels in this row, found 4", diag.items.items[0].message);

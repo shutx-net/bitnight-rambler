@@ -36,7 +36,7 @@ pub fn play(gpa: Allocator, io: Io, rambler: *const Rambler, options: Options) !
     defer canvas.deinit(gpa);
     var screen: Screen = try .init(gpa, size.cols, size.rows, options.color_mode);
     defer screen.deinit(gpa);
-    var actor: Actor = .init(rambler, options.mode, options.seed, size.cols);
+    var actor: Actor = .init(rambler, options.mode, options.seed, .{ .width = canvas.width, .height = canvas.height });
 
     const tick: Io.Duration = .fromMicroseconds(tick_us);
     var next_tick = Io.Clock.awake.now(io);
@@ -46,7 +46,7 @@ pub fn play(gpa: Allocator, io: Io, rambler: *const Rambler, options: Options) !
             try canvas.resize(gpa, size.cols, 2 * size.rows);
             try screen.resize(gpa, size.cols, size.rows);
             try out.writeAll(Terminal.clear_sequence);
-            actor.resize(size.cols);
+            actor.resize(.{ .width = canvas.width, .height = canvas.height });
         }
 
         const now = Io.Clock.awake.now(io);
@@ -56,15 +56,13 @@ pub fn play(gpa: Allocator, io: Io, rambler: *const Rambler, options: Options) !
                 next_tick = now;
                 break;
             }
-            actor.update(tick_us, size.cols);
+            actor.update(tick_us);
             next_tick = next_tick.addDuration(tick);
         }
 
         const frame = actor.frame();
         canvas.clear();
-        // Ramblers walk along the bottom edge, and jump up from it.
-        const y = @as(i32, canvas.height) - frame.sprite.height - frame.lift;
-        canvas.drawSprite(frame.sprite, &rambler.palette, frame.x, y, frame.mirror);
+        canvas.drawSprite(frame.sprite, &rambler.palette, frame.x, frame.y, frame.flip);
         screen.compose(&canvas);
         try screen.flush(out);
         try out.flush();

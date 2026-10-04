@@ -19,7 +19,7 @@ const play = @import("play.zig");
 const version = "0.1.0";
 
 const usage =
-    \\Usage: rambit <rambler> [options]     let a rambler roam the bottom of your terminal
+    \\Usage: rambit <rambler> [options]     let a rambler roam the edges of your terminal
     \\       rambit <path> [options]        the same, loading the rambler from a directory
     \\       rambit list                    list the built-in ramblers
     \\       rambit preview <rambler|path>  print every animation frame
@@ -336,35 +336,59 @@ fn lessThan(_: void, a: []const u8, b: []const u8) bool {
 }
 
 /// Prints every animation as a row of frames, for reviewing sprites without
-/// running the animation (in a pull request, say).
+/// running the animation (in a pull request, say). Each surface's frames
+/// are shown at their own size, as drawn in their files.
 fn preview(arena: Allocator, io: Io, r: *const Rambler, mode: color.Mode, stdout: *Writer) !void {
     try stdout.print("{s} ({s}){s}{s}\n", .{ r.name, r.id, if (r.description.len != 0) ": " else "", r.description });
     try stdout.print("{d}x{d} pixels, facing {t}, {d} px/s", .{ r.width, r.height, r.facing, r.speed });
-    if (r.animations.get(.run) != null) try stdout.print(", running {d} px/s", .{r.run_speed});
-    if (r.animations.get(.jump) != null) try stdout.print(", jumping {d} px", .{r.jump_height});
+    if (hasAnimation(r, .run)) try stdout.print(", running {d} px/s", .{r.run_speed});
+    if (hasAnimation(r, .jump)) try stdout.print(", jumping {d} px", .{r.jump_height});
+    try stdout.writeAll("\nedges: ");
+    var edges = r.edges.iterator();
+    var first = true;
+    while (edges.next()) |edge| : (first = false) {
+        try stdout.print("{s}{t}", .{ if (first) "" else ", ", edge });
+    }
     try stdout.writeByte('\n');
 
     const gap = 2;
     const term_cols: usize = if (try Io.File.stdout().isTty(io)) Terminal.size(io).cols else 80;
-    const per_line = @max(1, (term_cols + gap) / (r.width + gap));
-    // Cells hold two pixel rows, so round odd heights up.
-    const height = r.height + r.height % 2;
 
-    for (std.enums.values(Rambler.Animation.Kind)) |kind| {
-        const anim = r.animations.get(kind) orelse continue;
-        try stdout.print("\n{t}: {d} frame{s}, {d} ms each\n", .{ kind, anim.frames.len, if (anim.frames.len == 1) "" else "s", anim.frame_ms });
-        var frames = std.mem.window(Sprite, anim.frames, per_line, per_line);
-        while (frames.next()) |line| {
-            const width: u16 = @intCast(line.len * r.width + (line.len - 1) * gap);
-            var canvas: Canvas = try .init(arena, width, height);
-            for (line, 0..) |frame, i| {
-                canvas.drawSprite(frame, &r.palette, @intCast(i * (r.width + gap)), 0, false);
+    for (std.enums.values(Rambler.Surface)) |surface| {
+        const prefix = switch (surface) {
+            .floor => "",
+            .wall => "wall ",
+            .ceiling => "ceiling ",
+        };
+        for (std.enums.values(Rambler.Animation.Kind)) |kind| {
+            const anim = r.animations.get(surface).get(kind) orelse continue;
+            try stdout.print("\n{s}{t}: {d} frame{s}, {d} ms each\n", .{ prefix, kind, anim.frames.len, if (anim.frames.len == 1) "" else "s", anim.frame_ms });
+            const frame_width = anim.frames[0].width;
+            const frame_height = anim.frames[0].height;
+            const per_line = @max(1, (term_cols + gap) / (frame_width + gap));
+            // Cells hold two pixel rows, so round odd heights up.
+            const height = frame_height + frame_height % 2;
+            var frames = std.mem.window(Sprite, anim.frames, per_line, per_line);
+            while (frames.next()) |line| {
+                const width: u16 = @intCast(line.len * frame_width + (line.len - 1) * gap);
+                var canvas: Canvas = try .init(arena, width, height);
+                for (line, 0..) |frame, i| {
+                    canvas.drawSprite(frame, &r.palette, @intCast(i * (frame_width + gap)), 0, .{});
+                }
+                const cells = try arena.alloc(Screen.Cell, @as(usize, width) * (height / 2));
+                Screen.cellsFromCanvas(cells, &canvas);
+                try Screen.writeLines(stdout, cells, width, mode);
             }
-            const cells = try arena.alloc(Screen.Cell, @as(usize, width) * (height / 2));
-            Screen.cellsFromCanvas(cells, &canvas);
-            try Screen.writeLines(stdout, cells, width, mode);
         }
     }
+}
+
+/// Whether the rambler has a `kind` animation on any surface.
+fn hasAnimation(r: *const Rambler, kind: Rambler.Animation.Kind) bool {
+    for (r.animations.values) |set| {
+        if (set.get(kind) != null) return true;
+    }
+    return false;
 }
 
 test {
@@ -375,6 +399,7 @@ test {
     _ = @import("Screen.zig");
     _ = @import("Source.zig");
     _ = @import("Terminal.zig");
+    _ = @import("Track.zig");
     _ = @import("color.zig");
     _ = @import("sprite.zig");
 }

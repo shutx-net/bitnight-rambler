@@ -1,7 +1,7 @@
 {
   "id": "ghost",
   "name": "Ghost",
-  "description": "A shy little ghost that drifts back and forth, hem fluttering.",
+  "description": "A shy little ghost that drifts back and forth and up the walls, hem fluttering.",
   "width": 14,
   "height": 14,
   "facing": "right",
@@ -15,6 +15,16 @@
     "idle": { "frames": ["float-0", "float-1", "float-2", "float-3", "float-0", "float-1", "blink", "float-1"], "frame_ms": 220 },
     "walk": { "frames": ["float-0", "float-1", "float-2", "float-3"], "frame_ms": 180 },
     "sleep": { "frames": ["blink", "sleep-0"], "frame_ms": 1000 }
+  },
+  "wall_animations": {
+    "idle": { "frames": ["wall-float-0", "wall-float-1", "wall-float-2", "wall-float-3", "wall-float-0", "wall-float-1", "wall-blink", "wall-float-1"], "frame_ms": 220 },
+    "walk": { "frames": ["wall-float-0", "wall-float-1", "wall-float-2", "wall-float-3"], "frame_ms": 180 },
+    "sleep": { "frames": ["wall-blink", "wall-sleep-0"], "frame_ms": 1000 }
+  },
+  "ceiling_animations": {
+    "idle": { "frames": ["ceiling-float-0", "ceiling-float-1", "ceiling-float-2", "ceiling-float-3", "ceiling-float-0", "ceiling-float-1", "ceiling-blink", "ceiling-float-1"], "frame_ms": 220 },
+    "walk": { "frames": ["ceiling-float-0", "ceiling-float-1", "ceiling-float-2", "ceiling-float-3"], "frame_ms": 180 },
+    "sleep": { "frames": ["ceiling-blink", "ceiling-sleep-0"], "frame_ms": 1000 }
   },
   "motion": { "speed": 6 }
 }
