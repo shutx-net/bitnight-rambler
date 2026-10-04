@@ -15,18 +15,22 @@ const Sprite = @import("sprite.zig").Sprite;
 const Terminal = @import("Terminal.zig");
 const color = @import("color.zig");
 const play = @import("play.zig");
+const shell = @import("shell.zig");
 
 const version = "0.1.0";
 
 const usage =
     \\Usage: rambit <rambler> [options]     let a rambler roam the edges of your terminal
     \\       rambit <path> [options]        the same, loading the rambler from a directory
+    \\       rambit shell [rambler] [options] [-- command...]
+    \\                                      your shell, or a command, with a rambler
+    \\                                      roaming over it
     \\       rambit list                    list the built-in ramblers
     \\       rambit preview <rambler|path>  print every animation frame
     \\       rambit validate [path...]      check rambler directories (default: built-ins)
     \\
     \\Options:
-    \\  --once          cross the screen once and exit, like sl
+    \\  --once          cross the screen once and exit, like sl (not in rambit shell)
     \\  --seed <n>      seed the movement, for a reproducible run
     \\  --color <mode>  auto (default), truecolor or 256
     \\  -h, --help      show this help
@@ -34,6 +38,8 @@ const usage =
     \\
     \\A <path> is anything containing a '/', e.g. ./ramblers/cat.
     \\Press q, Esc or Ctrl-C to send the rambler home.
+    \\In rambit shell, Ctrl-] h hides or shows the rambler, Ctrl-] n brings the
+    \\next one and Ctrl-] Ctrl-] sends Ctrl-].
     \\
 ;
 
@@ -53,6 +59,14 @@ const Command = union(enum) {
     preview: []const u8,
     validate: []const [:0]const u8,
     play: []const u8,
+    shell: Shell,
+};
+
+const Shell = struct {
+    /// Null means the built-ins in turn.
+    rambler: ?[]const u8,
+    /// Empty means the user's shell.
+    command: []const [:0]const u8,
 };
 
 const Cli = struct {
@@ -103,16 +117,47 @@ pub fn main(init: std.process.Init) !u8 {
                 try stderr.print("rambit: stdout is not a terminal; try `rambit preview {s}`\n", .{spec});
                 return 1;
             }
-            const seed = cli.seed orelse seed: {
-                var bytes: [8]u8 = undefined;
-                io.random(&bytes);
-                break :seed std.mem.readInt(u64, &bytes, .little);
-            };
             try play.play(init.gpa, io, &rambler, .{
                 .mode = if (cli.once) .once else .roam,
-                .seed = seed,
+                .seed = cli.seed orelse randomSeed(io),
                 .color_mode = color_mode,
             });
+        },
+        .shell => |sh| {
+            if (init.environ_map.get(shell.nesting_variable) != null) {
+                try stderr.writeAll("rambit: already running inside `rambit shell`; it does not nest\n");
+                return 1;
+            }
+            if (!try Io.File.stdin().isTty(io) or !try Io.File.stdout().isTty(io)) {
+                try stderr.writeAll("rambit: `rambit shell` needs a terminal\n");
+                return 1;
+            }
+            const ramblers = try shellRamblers(arena, io, sh.rambler, stderr) orelse return 1;
+            const env = try shell.childEnvironment(arena, init.environ_map);
+            const args_copy = try arena.alloc([]const u8, sh.command.len);
+            for (args_copy, sh.command) |*dest, arg| dest.* = arg;
+            const argv = try shell.command(arena, &env, args_copy);
+            return shell.run(init.gpa, io, .{
+                .ramblers = ramblers,
+                .seed = cli.seed orelse randomSeed(io),
+                .color_mode = color_mode,
+                .argv = argv,
+                .environ = &env,
+            }) catch |err| switch (err) {
+                error.FileNotFound => {
+                    try stderr.print("rambit: unable to run '{s}': {t}\n", .{ argv[0], err });
+                    return 127;
+                },
+                error.AccessDenied, error.ExecFailed => {
+                    try stderr.print("rambit: unable to run '{s}': {t}\n", .{ argv[0], err });
+                    return 126;
+                },
+                error.PtyUnavailable => {
+                    try stderr.writeAll("rambit: no pseudo-terminal available\n");
+                    return 1;
+                },
+                else => |e| return e,
+            };
         },
     }
     return 0;
@@ -128,6 +173,11 @@ fn parseArgs(args: []const [:0]const u8, stderr: *Writer) (UsageError || Writer.
     while (i < args.len) : (i += 1) {
         const arg: []const u8 = args[i];
         const is_option = arg.len > 1 and arg[0] == '-';
+        if (positional_count >= 1 and eql(positionals[0], "shell") and eql(arg, "--")) {
+            // Everything after `--` belongs to the command.
+            rest = args[i + 1 ..];
+            break;
+        }
         if (positional_count == 1 and eql(positionals[0], "validate") and !is_option) {
             // Everything after `validate` is a path.
             rest = args[i..];
@@ -182,6 +232,13 @@ fn parseArgs(args: []const [:0]const u8, stderr: *Writer) (UsageError || Writer.
             return error.Usage;
         } };
         return cli;
+    } else if (eql(first, "shell")) {
+        if (cli.once) {
+            try stderr.writeAll("rambit: --once does not apply to `rambit shell`\n");
+            return error.Usage;
+        }
+        cli.command = .{ .shell = .{ .rambler = second, .command = rest } };
+        return cli;
     } else {
         cli.command = .{ .play = first };
     }
@@ -204,6 +261,35 @@ fn optionValue(args: []const [:0]const u8, i: *usize, comptime name: []const u8)
 
 fn eql(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
+}
+
+fn randomSeed(io: Io) u64 {
+    var bytes: [8]u8 = undefined;
+    io.random(&bytes);
+    return std.mem.readInt(u64, &bytes, .little);
+}
+
+/// The ramblers `rambit shell` cycles through: the one named by `spec`, or
+/// else the first built-in, followed by every other built-in. Built-ins that
+/// fail to load are skipped. Null if `spec` cannot be loaded (reported to
+/// `stderr`).
+fn shellRamblers(arena: Allocator, io: Io, spec: ?[]const u8, stderr: *Writer) !?[]const Rambler {
+    var ramblers: std.ArrayList(Rambler) = .empty;
+    if (spec) |s| try ramblers.append(arena, try resolve(arena, io, s, stderr) orelse return null);
+    for (builtin_ramblers.entries) |entry| {
+        if (ramblers.items.len > 0 and eql(entry.id, ramblers.items[0].id)) continue;
+        var diag: Diagnostics = .init(arena);
+        const r = Rambler.load(arena, Source.embedded(entry), &diag) catch |err| switch (err) {
+            error.InvalidRambler => continue,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        try ramblers.append(arena, r);
+    }
+    if (ramblers.items.len == 0) {
+        try stderr.writeAll("rambit: there are no valid built-in ramblers; see `rambit validate`\n");
+        return null;
+    }
+    return ramblers.items;
 }
 
 /// Loads the rambler named by `spec`: a built-in one, or a directory when
@@ -412,7 +498,7 @@ test {
 }
 
 test parseArgs {
-    var buf: [256]u8 = undefined;
+    var buf: [1024]u8 = undefined;
     var w: Writer = .fixed(&buf);
 
     const play_cli = try parseArgs(&.{ "cat", "--once", "--seed=7", "--color", "256" }, &w);
@@ -435,4 +521,30 @@ test parseArgs {
     try std.testing.expectError(error.Usage, parseArgs(&.{ "cat", "--speed" }, &w));
     try std.testing.expectError(error.Usage, parseArgs(&.{ "cat", "--seed", "x" }, &w));
     try std.testing.expectError(error.Usage, parseArgs(&.{"preview"}, &w));
+
+    const shell_cli = try parseArgs(&.{"shell"}, &w);
+    try std.testing.expectEqual(null, shell_cli.command.shell.rambler);
+    try std.testing.expectEqual(0, shell_cli.command.shell.command.len);
+
+    const options_cli = try parseArgs(&.{ "shell", "slime", "--seed", "3", "--color", "256" }, &w);
+    try std.testing.expectEqualStrings("slime", options_cli.command.shell.rambler.?);
+    try std.testing.expectEqual(3, options_cli.seed.?);
+    try std.testing.expectEqual(.@"256", options_cli.color_mode.?);
+    try std.testing.expectEqual(0, options_cli.command.shell.command.len);
+
+    const vim_cli = try parseArgs(&.{ "shell", "--", "vim", "-u", "NONE" }, &w);
+    try std.testing.expectEqual(null, vim_cli.command.shell.rambler);
+    try std.testing.expectEqual(3, vim_cli.command.shell.command.len);
+    try std.testing.expectEqualStrings("-u", vim_cli.command.shell.command[1]);
+
+    const bash_cli = try parseArgs(&.{ "shell", "ghost", "--", "bash", "-l" }, &w);
+    try std.testing.expectEqualStrings("ghost", bash_cli.command.shell.rambler.?);
+    try std.testing.expectEqual(2, bash_cli.command.shell.command.len);
+    try std.testing.expectEqualStrings("bash", bash_cli.command.shell.command[0]);
+
+    try std.testing.expectEqual(0, (try parseArgs(&.{ "shell", "--" }, &w)).command.shell.command.len);
+
+    try std.testing.expectError(error.Usage, parseArgs(&.{ "shell", "--once" }, &w));
+    try std.testing.expectError(error.Usage, parseArgs(&.{ "shell", "a", "b" }, &w));
+    try std.testing.expectError(error.Usage, parseArgs(&.{ "cat", "--", "x" }, &w));
 }
