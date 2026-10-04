@@ -193,6 +193,14 @@ pub fn scrollDown(g: *Grid, top: u16, bottom: u16, n: u16, blank: Cell) void {
 /// y + drop_top; rows that no longer fit are lost and new ones are blank.
 /// Columns are cut off or padded on the right. Lines are not reflowed.
 pub fn resize(g: *Grid, gpa: Allocator, cols: u16, rows: u16, drop_top: u16) Allocator.Error!void {
+    const new = try g.resized(gpa, cols, rows, drop_top);
+    g.deinit(gpa);
+    g.* = new;
+}
+
+/// A copy of the grid at another size, as `resize` makes it, leaving the grid
+/// itself alone.
+pub fn resized(g: *const Grid, gpa: Allocator, cols: u16, rows: u16, drop_top: u16) Allocator.Error!Grid {
     assert(cols >= 1 and rows >= 1);
     const cells = try gpa.alloc(Cell, @as(usize, cols) * rows);
     errdefer gpa.free(cells);
@@ -207,9 +215,7 @@ pub fn resize(g: *Grid, gpa: Allocator, cols: u16, rows: u16, drop_top: u16) All
         // A character cut off from its right half.
         repair(new, cols, .{});
     }
-    gpa.free(g.cells);
-    gpa.free(g.lines);
-    g.* = .{ .cols = cols, .rows = rows, .cells = cells, .lines = lines };
+    return .{ .cols = cols, .rows = rows, .cells = cells, .lines = lines };
 }
 
 /// Writes row y as UTF-8 text, without the right halves of wide characters

@@ -106,6 +106,42 @@ pub fn deinit(e: *Emulator) void {
     e.* = undefined;
 }
 
+/// Changes the size of both screens, without reflowing lines. When the
+/// cursor would fall off the bottom, rows are dropped from the top of the
+/// screen being shown so that its row stays in view, as the last row: a shell
+/// prompt at the bottom stays at the bottom. The scroll region becomes the
+/// full screen. On failure the emulator is left as it was.
+pub fn resize(e: *Emulator, cols: u16, rows: u16) Allocator.Error!void {
+    const drop = (e.cursor.y + 1) -| rows;
+    const tabs = try e.gpa.alloc(bool, cols);
+    errdefer e.gpa.free(tabs);
+    var primary = try e.primary.resized(e.gpa, cols, rows, if (e.alt_active) 0 else drop);
+    errdefer primary.deinit(e.gpa);
+    const alternate = try e.alternate.resized(e.gpa, cols, rows, if (e.alt_active) drop else 0);
+
+    // Keep the stops there were, with one every 8 columns beyond them.
+    const kept = @min(cols, e.tabs.len);
+    defaultTabs(tabs);
+    @memcpy(tabs[0..kept], e.tabs[0..kept]);
+
+    e.primary.deinit(e.gpa);
+    e.alternate.deinit(e.gpa);
+    e.gpa.free(e.tabs);
+    e.primary = primary;
+    e.alternate = alternate;
+    e.tabs = tabs;
+
+    e.cursor.y -= drop;
+    e.clampCursor();
+    for (&e.saved) |*s| {
+        s.cursor.x = @min(s.cursor.x, cols - 1);
+        s.cursor.y = @min(s.cursor.y, rows - 1);
+        s.cursor.pending_wrap = false;
+    }
+    e.scroll_top = 0;
+    e.scroll_bottom = rows - 1;
+}
+
 /// Takes what the program wrote. It never fails: what cannot be handled is
 /// dropped.
 pub fn feed(e: *Emulator, bytes: []const u8) void {
@@ -148,7 +184,11 @@ fn defaultTabs(tabs: []bool) void {
 // Parser handler.
 
 pub fn print(e: *Emulator, cp: u21) void {
-    const c = e.mapCharset(cp);
+    e.put(e.mapCharset(cp));
+}
+
+/// Prints a character already mapped through the character sets.
+fn put(e: *Emulator, c: u21) void {
     const n = codepointWidth(c);
     if (n == 0) return; // combining marks are dropped
     const g = e.active();
@@ -245,11 +285,20 @@ pub fn escDispatch(e: *Emulator, esc: Parser.Esc) void {
 }
 
 pub fn csiDispatch(e: *Emulator, csi: Parser.Csi) void {
-    if (csi.intermediates.len != 0) return;
+    if (csi.intermediates.len != 0) {
+        const decstr = csi.marker == 0 and csi.final == 'p' and
+            csi.intermediates.len == 1 and csi.intermediates[0] == '!';
+        if (decstr) e.softReset();
+        return;
+    }
     switch (csi.marker) {
         0 => {},
         '>' => if (csi.final == 'c' and csi.param(0, 0) == 0) e.reply("\x1b[>1;10;0c", .{}),
-        '?' => if (csi.final == 'n' and csi.param(0, 0) == 6) e.reportPosition("?"),
+        '?' => switch (csi.final) {
+            'n' => if (csi.param(0, 0) == 6) e.reportPosition("?"),
+            'h', 'l' => for (csi.params) |p| e.setPrivateMode(p, csi.final == 'h'),
+            else => {},
+        },
         else => {},
     }
     if (csi.marker != 0) return;
@@ -289,6 +338,14 @@ pub fn csiDispatch(e: *Emulator, csi: Parser.Csi) void {
             g.erase(y, e.cursor.x, @intCast(@min(@as(u32, e.cursor.x) + n, g.cols)), e.blank());
             e.cursor.pending_wrap = false;
         },
+        'L' => e.insertLines(n),
+        'M' => e.deleteLines(n),
+        'S' => g.scrollUp(e.scroll_top, e.scroll_bottom, n, e.blank()),
+        // With more parameters it is an old mouse tracking request.
+        'T' => if (csi.params.len <= 1) g.scrollDown(e.scroll_top, e.scroll_bottom, n, e.blank()),
+        'b' => e.repeat(n),
+        'r' => e.setScrollRegion(csi.param(0, 1), csi.param(1, g.rows)),
+        'h', 'l' => for (csi.params) |p| e.setMode(p, csi.final == 'h'),
         'g' => switch (csi.param(0, 0)) {
             0 => e.tabs[e.cursor.x] = false,
             3 => @memset(e.tabs, false),
@@ -308,6 +365,14 @@ pub fn csiDispatch(e: *Emulator, csi: Parser.Csi) void {
 }
 
 // Characters.
+
+/// REP: prints the last character n more times.
+fn repeat(e: *Emulator, n: u16) void {
+    const c = e.last_printed orelse return;
+    const g = e.active();
+    const count = @min(@as(u32, n), @as(u32, g.cols) * g.rows);
+    for (0..count) |_| e.put(c);
+}
 
 fn mapCharset(e: *const Emulator, cp: u21) u21 {
     if (e.charsets.g[e.charsets.shift] == .dec_graphics and cp >= 0x5F and cp <= 0x7E) {
@@ -425,6 +490,97 @@ fn reportPosition(e: *Emulator, comptime marker: []const u8) void {
     e.reply("\x1b[" ++ marker ++ "{d};{d}R", .{ (e.cursor.y -| top) + 1, e.cursor.x + 1 });
 }
 
+// Scrolling.
+
+/// DECSTBM: rows top to bottom, 1-based, become the scroll region, and the
+/// cursor moves home. A region of fewer than two rows is ignored.
+fn setScrollRegion(e: *Emulator, top: u16, bottom: u16) void {
+    if (top >= bottom or bottom > e.primary.rows) return;
+    e.scroll_top = top - 1;
+    e.scroll_bottom = bottom - 1;
+    e.moveTo(0, 0);
+}
+
+fn inScrollRegion(e: *const Emulator) bool {
+    return e.cursor.y >= e.scroll_top and e.cursor.y <= e.scroll_bottom;
+}
+
+/// IL: n blank lines at the cursor's row, pushing the rows below it down to
+/// the bottom margin.
+fn insertLines(e: *Emulator, n: u16) void {
+    if (!e.inScrollRegion()) return;
+    e.active().scrollDown(e.cursor.y, e.scroll_bottom, n, e.blank());
+    e.cursor.x = 0;
+    e.cursor.pending_wrap = false;
+}
+
+/// DL: deletes n lines from the cursor's row, pulling the rows below it up
+/// from the bottom margin.
+fn deleteLines(e: *Emulator, n: u16) void {
+    if (!e.inScrollRegion()) return;
+    e.active().scrollUp(e.cursor.y, e.scroll_bottom, n, e.blank());
+    e.cursor.x = 0;
+    e.cursor.pending_wrap = false;
+}
+
+// Modes.
+
+/// SM and RM.
+fn setMode(e: *Emulator, mode: u16, on: bool) void {
+    switch (mode) {
+        4 => e.modes.insert = on,
+        20 => e.modes.newline = on,
+        else => {},
+    }
+}
+
+/// DECSET and DECRST. Mouse reporting, focus events, synchronized output and
+/// the like are not supported and ignored.
+fn setPrivateMode(e: *Emulator, mode: u16, on: bool) void {
+    switch (mode) {
+        1 => e.modes.app_cursor = on,
+        6 => {
+            e.modes.origin = on;
+            e.moveTo(0, 0);
+        },
+        7 => {
+            e.modes.autowrap = on;
+            if (!on) e.cursor.pending_wrap = false;
+        },
+        25 => e.modes.cursor_visible = on,
+        47 => e.switchScreen(on),
+        1047 => {
+            if (!on and e.alt_active) e.alternate.eraseAll(.{});
+            e.switchScreen(on);
+        },
+        1048 => if (on) e.saveCursor() else e.restoreCursor(),
+        1049 => if (on) {
+            e.saveCursor();
+            e.switchScreen(true);
+            e.alternate.eraseAll(.{});
+        } else {
+            e.switchScreen(false);
+            e.restoreCursor();
+        },
+        2004 => e.modes.bracketed_paste = on,
+        else => {},
+    }
+}
+
+/// Shows the alternate screen or the primary one. The cursor stays where it
+/// is, as in xterm.
+fn switchScreen(e: *Emulator, alternate: bool) void {
+    if (e.alt_active == alternate) return;
+    e.alt_active = alternate;
+    e.clampCursor();
+}
+
+fn clampCursor(e: *Emulator) void {
+    e.cursor.x = @min(e.cursor.x, e.primary.cols - 1);
+    e.cursor.y = @min(e.cursor.y, e.primary.rows - 1);
+    e.cursor.pending_wrap = false;
+}
+
 // Erasing.
 
 fn eraseDisplay(e: *Emulator, mode: u16) void {
@@ -464,6 +620,23 @@ fn screenAlignment(e: *Emulator) void {
     e.scroll_top = 0;
     e.scroll_bottom = e.primary.rows - 1;
     e.moveTo(0, 0);
+}
+
+/// DECSTR: the modes, pen, saved cursors and character sets back to their
+/// defaults, and the scroll region the full screen. The screen is kept, and
+/// so is the cursor's position.
+fn softReset(e: *Emulator) void {
+    e.modes.insert = false;
+    e.modes.origin = false;
+    e.modes.app_cursor = false;
+    e.modes.app_keypad = false;
+    e.modes.autowrap = true;
+    e.modes.cursor_visible = true;
+    e.scroll_top = 0;
+    e.scroll_bottom = e.primary.rows - 1;
+    e.cursor.style = .{};
+    e.saved = .{ .{}, .{} };
+    e.charsets = .{};
 }
 
 /// RIS: everything back to how it started, both screens erased. Pending
@@ -981,5 +1154,317 @@ test "init fails cleanly" {
     for (0..5) |fail_index| {
         var failing: std.testing.FailingAllocator = .init(testing.allocator, .{ .fail_index = fail_index });
         try testing.expectError(error.OutOfMemory, Emulator.init(failing.allocator(), 4, 4));
+    }
+}
+
+test "scroll region" {
+    var e: Emulator = try .init(testing.allocator, 3, 5);
+    defer e.deinit();
+    e.feed("1\r\n2\r\n3\r\n4\r\n5\x1b[2;4r");
+    try expectCursor(&e, 0, 0);
+    try testing.expectEqual(@as(u16, 1), e.scroll_top);
+    try testing.expectEqual(@as(u16, 3), e.scroll_bottom);
+
+    // LF at the bottom margin scrolls only the region.
+    e.feed("\x1b[4;1H\nX");
+    try expectRows(&e, &.{ "1", "3", "4", "X", "5" });
+    // RI at the top margin.
+    e.feed("\x1b[2;1H\x1bMY");
+    try expectRows(&e, &.{ "1", "Y", "3", "4", "5" });
+
+    // CUU and CUD stop at the margins, from inside the region or beyond it.
+    e.feed("\x1b[3;1H\x1b[9A");
+    try expectCursor(&e, 0, 1);
+    e.feed("\x1b[9B");
+    try expectCursor(&e, 0, 3);
+    e.feed("\x1b[5;1H\x1b[9A");
+    try expectCursor(&e, 0, 1);
+    e.feed("\x1b[5;1H\x1b[9B");
+    try expectCursor(&e, 0, 4);
+    // Below the region, LF on the last row does not scroll.
+    e.feed("\nZ");
+    try expectRows(&e, &.{ "1", "Y", "3", "4", "Z" });
+
+    // Invalid regions are ignored and leave the cursor alone.
+    e.feed("\x1b[3;3r\x1b[2;9r\x1b[4;2r");
+    try testing.expectEqual(@as(u16, 1), e.scroll_top);
+    try testing.expectEqual(@as(u16, 3), e.scroll_bottom);
+    try expectCursor(&e, 1, 4);
+    // No parameters means the full screen.
+    e.feed("\x1b[r");
+    try testing.expectEqual(@as(u16, 0), e.scroll_top);
+    try testing.expectEqual(@as(u16, 4), e.scroll_bottom);
+    try expectCursor(&e, 0, 0);
+}
+
+test "IL and DL" {
+    var e: Emulator = try .init(testing.allocator, 3, 5);
+    defer e.deinit();
+    e.feed("a\r\nb\r\nc\r\nd\r\ne\x1b[2;4r");
+    e.feed("\x1b[3;2H\x1b[L");
+    try expectRows(&e, &.{ "a", "b", "", "c", "e" });
+    try expectCursor(&e, 0, 2);
+    e.feed("\x1b[M");
+    try expectRows(&e, &.{ "a", "b", "c", "", "e" });
+
+    // Outside the region they do nothing.
+    e.feed("\x1b[5;2H\x1b[L\x1b[1;2H\x1b[2M");
+    try expectRows(&e, &.{ "a", "b", "c", "", "e" });
+    try expectCursor(&e, 1, 0);
+
+    e.feed("\x1b[2;1H\x1b[9M");
+    try expectRows(&e, &.{ "a", "", "", "", "e" });
+    // The new lines take the pen's background.
+    e.feed("\x1b[41m\x1b[L");
+    try testing.expect(cellAt(&e, 2, 1).eql(.{ .style = .{ .bg = .{ .palette = 1 } } }));
+    try testing.expect(cellAt(&e, 2, 3).eql(.{}));
+}
+
+test "SU and SD" {
+    var e: Emulator = try .init(testing.allocator, 3, 5);
+    defer e.deinit();
+    e.feed("1\r\n2\r\n3\r\n4\r\n5");
+    e.feed("\x1b[2S");
+    try expectRows(&e, &.{ "3", "4", "5", "", "" });
+    try expectCursor(&e, 1, 4);
+    e.feed("\x1b[T");
+    try expectRows(&e, &.{ "", "3", "4", "5", "" });
+    // SD with more parameters is an old mouse sequence.
+    e.feed("\x1b[1;2;3;4;5T");
+    try expectRows(&e, &.{ "", "3", "4", "5", "" });
+    e.feed("\x1b[2;4r\x1b[S");
+    try expectRows(&e, &.{ "", "4", "5", "", "" });
+}
+
+test "REP" {
+    var e: Emulator = try .init(testing.allocator, 10, 2);
+    defer e.deinit();
+    // Nothing printed yet, nothing to repeat.
+    e.feed("\x1b[3b");
+    try expectRows(&e, &.{ "", "" });
+    e.feed("ab\x1b[3b");
+    try expectRows(&e, &.{ "abbbb", "" });
+    // The character is repeated as printed, not mapped again.
+    e.feed("\x1b(0q\x1b(B\x1b[2bx\x1b(0\x1b[b");
+    try expectRows(&e, &.{ "abbbb───xx", "" });
+    // The count is capped at a screenful.
+    e.feed("\x1b[H\x1b[65535b");
+    try expectRows(&e, &.{ "xxxxxxxxxx", "xxxxxxxxxx" });
+}
+
+test "insert mode" {
+    var e: Emulator = try .init(testing.allocator, 6, 1);
+    defer e.deinit();
+    e.feed("abcdef\x1b[1G\x1b[4hXY");
+    try testing.expect(e.modes.insert);
+    try expectRows(&e, &.{"XYabcd"});
+    e.feed("\x1b[4lZ");
+    try expectRows(&e, &.{"XYZbcd"});
+    // A wide character pushed off the edge goes whole.
+    e.feed("\x1b[1Gaaaaあ\x1b[1G\x1b[4hb");
+    try expectRows(&e, &.{"baaaa"});
+    try testing.expect(cellAt(&e, 5, 0).eql(.{}));
+}
+
+test "LNM" {
+    var e: Emulator = try .init(testing.allocator, 4, 3);
+    defer e.deinit();
+    e.feed("\x1b[20hab\ncd");
+    try testing.expect(e.modes.newline);
+    e.feed("\x1b[20l\nx");
+    try expectRows(&e, &.{ "ab", "cd", "  x" });
+}
+
+test "origin mode" {
+    var e: Emulator = try .init(testing.allocator, 5, 5);
+    defer e.deinit();
+    e.feed("\x1b[2;4r\x1b[3;3H\x1b[?6h");
+    try expectCursor(&e, 0, 1);
+    e.feed("\x1b[2;3H\x1b[6n");
+    try expectCursor(&e, 2, 2);
+    try testing.expectEqualStrings("\x1b[2;3R", e.replies());
+    e.feed("\x1b[9;1H");
+    try expectCursor(&e, 0, 3);
+    e.feed("\x1b[?6l");
+    try testing.expect(!e.modes.origin);
+    try expectCursor(&e, 0, 0);
+}
+
+test "DECAWM" {
+    var e: Emulator = try .init(testing.allocator, 4, 2);
+    defer e.deinit();
+    e.feed("\x1b[?7labcdef");
+    try expectRows(&e, &.{ "abcf", "" });
+    try expectCursor(&e, 3, 0);
+    try testing.expect(!e.cursor.pending_wrap);
+    // Turning it off cancels a pending wrap.
+    e.feed("\x1b[?7h\x1b[2;1Hwxyz");
+    try testing.expect(e.cursor.pending_wrap);
+    e.feed("\x1b[?7l");
+    try testing.expect(!e.cursor.pending_wrap);
+    e.feed("Q");
+    try expectRows(&e, &.{ "abcf", "wxyQ" });
+}
+
+test "private modes and DECSTR" {
+    var e: Emulator = try .init(testing.allocator, 4, 3);
+    defer e.deinit();
+    e.feed("\x1b[?25l");
+    try testing.expect(!e.modes.cursor_visible);
+    e.feed("\x1b[?25h");
+    try testing.expect(e.modes.cursor_visible);
+    e.feed("\x1b[?1;2004h");
+    try testing.expect(e.modes.app_cursor and e.modes.bracketed_paste);
+    e.feed("\x1b[?2004l");
+    try testing.expect(!e.modes.bracketed_paste);
+    // Mouse reporting, focus events and synchronized output are ignored.
+    const before = e.modes;
+    e.feed("\x1b[?1000;1002;1006;1004;2026;12h");
+    try testing.expectEqual(before, e.modes);
+
+    e.feed("ab\x1b[2;3r\x1b[?6;25l\x1b[?7l\x1b[4h\x1b=\x1b[31m\x1b(0\x1b7\x1b[2;2H");
+    e.feed("\x1b[!p");
+    try testing.expectEqual(Modes{}, e.modes);
+    try testing.expectEqual(@as(u16, 0), e.scroll_top);
+    try testing.expectEqual(@as(u16, 2), e.scroll_bottom);
+    try testing.expect(e.cursor.style.eql(.{}));
+    try testing.expectEqual(Charset.ascii, e.charsets.g[0]);
+    try testing.expectEqual(Saved{}, e.saved[0]);
+    // The screen and the cursor's position are kept.
+    try expectRows(&e, &.{ "ab", "", "" });
+    try expectCursor(&e, 1, 1);
+}
+
+test "alternate screen 1049" {
+    var e: Emulator = try .init(testing.allocator, 6, 3);
+    defer e.deinit();
+    e.feed("prim\x1b[2;3H\x1b[1;31m\x1b[?1049h");
+    try testing.expect(e.alt_active);
+    try expectRows(&e, &.{ "", "", "" });
+    // The cursor stays where it was.
+    try expectCursor(&e, 2, 1);
+    e.feed("\x1b[m\x1b[Halt\r\nscreen");
+    try expectRows(&e, &.{ "alt", "screen", "" });
+    try testing.expectEqualStrings("prim", blk: {
+        var buf: [16]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        try e.primary.writeRow(0, &w);
+        break :blk w.buffered();
+    });
+
+    e.feed("\x1b[?1049l");
+    try testing.expect(!e.alt_active);
+    try expectRows(&e, &.{ "prim", "", "" });
+    try expectCursor(&e, 2, 1);
+    try testing.expect(e.cursor.style.eql(.{ .fg = .{ .palette = 1 }, .attrs = .{ .bold = true } }));
+
+    // Coming back finds the alternate screen erased, without the pen's
+    // background.
+    e.feed("\x1b[44m\x1b[?1049h");
+    try expectRows(&e, &.{ "", "", "" });
+    try testing.expect(cellAt(&e, 0, 0).eql(.{}));
+    // Switching to where it already is does nothing.
+    e.feed("\x1b[Hx\x1b[?47h");
+    try expectRows(&e, &.{ "x", "", "" });
+}
+
+test "alternate screen 47, 1047 and 1048" {
+    var e: Emulator = try .init(testing.allocator, 4, 3);
+    defer e.deinit();
+    e.feed("p\x1b[?47hx\x1b[?47l");
+    try expectRows(&e, &.{ "p", "", "" });
+    // 47 keeps the alternate screen's contents.
+    e.feed("\x1b[?47h");
+    try expectRows(&e, &.{ " x", "", "" });
+    try expectCursor(&e, 2, 0);
+    // 1047 erases them when it leaves.
+    e.feed("\x1b[?1047l\x1b[?1047h");
+    try expectRows(&e, &.{ "", "", "" });
+    e.feed("\x1b[?1047l");
+    try expectRows(&e, &.{ "p", "", "" });
+
+    e.feed("\x1b[2;2H\x1b[?1048h\x1b[H\x1b[?1048l");
+    try expectCursor(&e, 1, 1);
+}
+
+test "RIS from the alternate screen" {
+    var e: Emulator = try .init(testing.allocator, 4, 2);
+    defer e.deinit();
+    e.feed("p\x1b[?1049hx\x1b[?1;2004h\x1b[2;2r\x1bc");
+    try testing.expect(!e.alt_active);
+    try expectRows(&e, &.{ "", "" });
+    try testing.expectEqual(Modes{}, e.modes);
+    try testing.expectEqual(@as(u16, 1), e.scroll_bottom);
+    try expectCursor(&e, 0, 0);
+    e.feed("\x1b[?47h");
+    try expectRows(&e, &.{ "", "" });
+}
+
+test "resize" {
+    var e: Emulator = try .init(testing.allocator, 4, 4);
+    defer e.deinit();
+    e.feed("1\r\n2\r\n3\r\n4\x1b[1;3r\x1b[4;2H");
+
+    // Smaller with the cursor on the last row keeps that row, as the last.
+    try e.resize(4, 2);
+    try expectRows(&e, &.{ "3", "4" });
+    try expectCursor(&e, 1, 1);
+    try testing.expectEqual(@as(u16, 0), e.scroll_top);
+    try testing.expectEqual(@as(u16, 1), e.scroll_bottom);
+
+    // Larger pads.
+    try e.resize(6, 3);
+    try expectRows(&e, &.{ "3", "4", "" });
+    try expectCursor(&e, 1, 1);
+    try testing.expectEqual(@as(u16, 2), e.scroll_bottom);
+
+    // Smaller with the cursor above the bottom keeps the top rows, and the
+    // cursor's column is clamped.
+    e.feed("\x1b[1;1Hあい\x1b[1;6H");
+    try e.resize(3, 2);
+    try expectRows(&e, &.{ "あ", "4" });
+    try expectCursor(&e, 2, 0);
+    try testing.expect(!e.cursor.pending_wrap);
+
+    // Feeding works at the new size.
+    e.feed("\x1b[2;1Habcd");
+    try expectRows(&e, &.{ "abc", "d" });
+}
+
+test "resize the alternate screen" {
+    var e: Emulator = try .init(testing.allocator, 4, 3);
+    defer e.deinit();
+    e.feed("p\r\nq\r\nr\x1b[?1049ha\r\nb\r\nc");
+    try e.resize(4, 2);
+    // Rows are dropped from the screen being shown only.
+    try expectRows(&e, &.{ "b", "c" });
+    try expectCursor(&e, 1, 1);
+    e.feed("\x1b[?1049l");
+    try expectRows(&e, &.{ "p", "q" });
+    // The saved cursor was clamped.
+    try expectCursor(&e, 1, 1);
+}
+
+test "resize keeps tab stops and adds new ones" {
+    var e: Emulator = try .init(testing.allocator, 10, 1);
+    defer e.deinit();
+    e.feed("\x1b[3g\x1b[4G\x1bH");
+    try e.resize(20, 1);
+    e.feed("\r\ta\tb\tc");
+    try expectRows(&e, &.{"   a            b  c"});
+}
+
+test "resize fails cleanly" {
+    // init makes five allocations and resize five more.
+    for (5..10) |fail_index| {
+        var failing: std.testing.FailingAllocator = .init(testing.allocator, .{ .fail_index = fail_index });
+        var e: Emulator = try .init(failing.allocator(), 4, 2);
+        defer e.deinit();
+        e.feed("ab\r\ncd");
+        try testing.expectError(error.OutOfMemory, e.resize(6, 3));
+        try expectRows(&e, &.{ "ab", "cd" });
+        try testing.expectEqual(@as(usize, 4), e.tabs.len);
+        e.feed("\x1b[?1049h");
+        try expectRows(&e, &.{ "", "" });
     }
 }
