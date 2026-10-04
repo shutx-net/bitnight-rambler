@@ -135,7 +135,7 @@ pub const default_frame_ms = 150;
 pub const default_speed = 8;
 
 /// Ids double as command-line arguments, so subcommand names are off limits.
-pub const reserved_ids = [_][]const u8{ "list", "validate", "preview", "help", "version" };
+pub const reserved_ids = [_][]const u8{ "list", "validate", "preview", "shell", "help", "version" };
 
 pub const LoadError = error{ InvalidRambler, OutOfMemory };
 
@@ -975,6 +975,24 @@ test "load reports invalid JSON with its position" {
     }, &diag));
     try testing.expectEqual(1, diag.items.items.len);
     try testing.expectEqual(4, diag.items.items[0].line);
+}
+
+test "load rejects an id reserved for a rambit command" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var diag: Diagnostics = .init(arena);
+
+    try testing.expectError(error.InvalidRambler, load(arena, Source.embedded(.{ .id = "shell", .files = &.{
+        .{ .name = "manifest.json", .data =
+        \\{ "id": "shell", "name": "Shell", "width": 2, "height": 2,
+        \\  "palette": { "k": "#000000" },
+        \\  "animations": { "walk": { "frames": ["a"] } } }
+        },
+        .{ .name = "a.sprite", .data = "k.\n.k\n" },
+    } }), &diag));
+    try testing.expectEqual(1, diag.items.items.len);
+    try testing.expectEqualStrings("id: \"shell\" is reserved for a rambit command", diag.items.items[0].message);
 }
 
 test "every built-in rambler is valid" {

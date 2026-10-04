@@ -2,6 +2,12 @@
 //! keyboard input, the alternate screen, a hidden cursor and no line
 //! wrapping. Resize and termination signals are turned into flags for the
 //! main loop to poll, since almost nothing is safe to do in a signal handler.
+//!
+//! `rambit shell` enters the terminal the same way, but on leaving also
+//! resets the keyboard modes it passes through from the child program
+//! (application cursor keys, the application keypad and bracketed paste),
+//! so that a shell exiting mid-way through a full-screen program does not
+//! leave the user's terminal sending unexpected key codes.
 
 const Terminal = @This();
 
@@ -10,6 +16,8 @@ const Io = std.Io;
 const posix = std.posix;
 
 io: Io,
+/// What the terminal was entered for, which decides how it is left.
+use: Use,
 /// Input settings to restore on exit; null when stdin is not a terminal,
 /// in which case keys are not read at all.
 original: ?posix.termios,
@@ -20,6 +28,8 @@ previous_actions: [handled_signals.len]posix.Sigaction = undefined,
 pub const Size = struct { cols: u16, rows: u16 };
 
 pub const Key = enum { none, quit };
+
+pub const Use = enum { animation, shell };
 
 /// Set by the signal handlers, consumed by the main loop.
 pub var resized: std.atomic.Value(bool) = .init(false);
@@ -43,13 +53,41 @@ const leave_sequence =
     "\x1b[?25h" ++
     "\x1b[?1049l";
 
+/// The keyboard modes a child program may have turned on through rambit
+/// shell are turned off before the usual reset.
+const shell_leave_sequence =
+    "\x1b[?1l" ++ // normal cursor keys
+    "\x1b>" ++ // numeric keypad
+    "\x1b[?2004l" ++ // no bracketed paste
+    leave_sequence;
+
+fn leaveSequence(use: Use) []const u8 {
+    return switch (use) {
+        .animation => leave_sequence,
+        .shell => shell_leave_sequence,
+    };
+}
+
 /// Copy of `original` for `emergencyRestore`, which cannot be handed one.
 var saved_termios: ?posix.termios = null;
 var active: std.atomic.Value(bool) = .init(false);
+/// Copy of `use` for `emergencyRestore`.
+var active_use: Use = .animation;
 
 pub fn enter(io: Io, out: *Io.Writer) !Terminal {
+    return enterFor(io, out, .animation);
+}
+
+/// Like `enter`, for rambit shell: the terminal is set up the same way, and
+/// leaving it also resets the keyboard modes mirrored from the child.
+pub fn enterShell(io: Io, out: *Io.Writer) !Terminal {
+    return enterFor(io, out, .shell);
+}
+
+fn enterFor(io: Io, out: *Io.Writer, use: Use) !Terminal {
     var t: Terminal = .{
         .io = io,
+        .use = use,
         .original = posix.tcgetattr(posix.STDIN_FILENO) catch null,
         .reading_keys = true,
     };
@@ -78,6 +116,7 @@ pub fn enter(io: Io, out: *Io.Writer) !Terminal {
     };
     for (handled_signals, &t.previous_actions) |sig, *previous| posix.sigaction(sig, &action, previous);
 
+    active_use = use;
     active.store(true, .release);
     errdefer t.leave(out);
     try out.writeAll(enter_sequence);
@@ -86,7 +125,7 @@ pub fn enter(io: Io, out: *Io.Writer) !Terminal {
 }
 
 pub fn leave(t: *Terminal, out: *Io.Writer) void {
-    out.writeAll(leave_sequence) catch {};
+    out.writeAll(leaveSequence(t.use)) catch {};
     out.flush() catch {};
     if (t.original) |original| posix.tcsetattr(posix.STDIN_FILENO, .FLUSH, original) catch {};
     for (handled_signals, &t.previous_actions) |sig, *previous| posix.sigaction(sig, previous, null);
@@ -97,7 +136,8 @@ pub fn leave(t: *Terminal, out: *Io.Writer) void {
 /// Restores the terminal from a panic, bypassing all buffering.
 pub fn emergencyRestore() void {
     if (!active.swap(false, .acq_rel)) return;
-    _ = posix.system.write(posix.STDOUT_FILENO, leave_sequence.ptr, leave_sequence.len);
+    const sequence = leaveSequence(active_use);
+    _ = posix.system.write(posix.STDOUT_FILENO, sequence.ptr, sequence.len);
     if (saved_termios) |original| posix.tcsetattr(posix.STDIN_FILENO, .FLUSH, original) catch {};
 }
 
@@ -159,4 +199,13 @@ test parseKeys {
     try std.testing.expectEqual(.quit, parseKeys("\x1b"));
     try std.testing.expectEqual(.none, parseKeys("\x1b[A"));
     try std.testing.expectEqual(.none, parseKeys("x"));
+}
+
+test leaveSequence {
+    try std.testing.expectEqualStrings(leave_sequence, leaveSequence(.animation));
+    const shell = leaveSequence(.shell);
+    try std.testing.expect(std.mem.endsWith(u8, shell, leave_sequence));
+    for ([_][]const u8{ "\x1b[?1l", "\x1b>", "\x1b[?2004l" }) |reset| {
+        try std.testing.expect(std.mem.indexOf(u8, shell, reset) != null);
+    }
 }
