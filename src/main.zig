@@ -406,6 +406,7 @@ test {
     _ = @import("color.zig");
     _ = @import("compose.zig");
     _ = @import("poll.zig");
+    _ = @import("shell.zig");
     _ = @import("sprite.zig");
     _ = @import("vt/vt.zig");
 }
