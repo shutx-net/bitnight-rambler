@@ -5,9 +5,11 @@
 pub const width = @import("width.zig");
 pub const Parser = @import("Parser.zig");
 pub const Grid = @import("Grid.zig");
+pub const Emulator = @import("Emulator.zig");
 
 test {
     _ = width;
     _ = Parser;
     _ = Grid;
+    _ = Emulator;
 }
