@@ -3,7 +3,9 @@
 //! be drawn over it.
 
 pub const width = @import("width.zig");
+pub const Parser = @import("Parser.zig");
 
 test {
     _ = width;
+    _ = Parser;
 }
