@@ -4,8 +4,10 @@
 
 pub const width = @import("width.zig");
 pub const Parser = @import("Parser.zig");
+pub const Grid = @import("Grid.zig");
 
 test {
     _ = width;
     _ = Parser;
+    _ = Grid;
 }
