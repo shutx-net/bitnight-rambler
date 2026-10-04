@@ -395,12 +395,14 @@ test {
     _ = @import("Actor.zig");
     _ = @import("Canvas.zig");
     _ = @import("Diagnostics.zig");
+    _ = @import("Pty.zig");
     _ = @import("Rambler.zig");
     _ = @import("Screen.zig");
     _ = @import("Source.zig");
     _ = @import("Terminal.zig");
     _ = @import("Track.zig");
     _ = @import("color.zig");
+    _ = @import("poll.zig");
     _ = @import("sprite.zig");
     _ = @import("vt/vt.zig");
 }
