@@ -395,6 +395,7 @@ test {
     _ = @import("Actor.zig");
     _ = @import("Canvas.zig");
     _ = @import("Diagnostics.zig");
+    _ = @import("Display.zig");
     _ = @import("Prefix.zig");
     _ = @import("Pty.zig");
     _ = @import("Rambler.zig");
@@ -403,6 +404,7 @@ test {
     _ = @import("Terminal.zig");
     _ = @import("Track.zig");
     _ = @import("color.zig");
+    _ = @import("compose.zig");
     _ = @import("poll.zig");
     _ = @import("sprite.zig");
     _ = @import("vt/vt.zig");
