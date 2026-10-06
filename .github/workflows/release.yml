@@ -293,8 +293,18 @@ jobs:
           fi
           cd dist && sha256sum -c SHA256SUMS
       # A draft first, so the release only appears with all its assets.
-      # `gh release create` fails if the release exists: nothing is
-      # overwritten.
+      # GitHub happily keeps a draft next to a release with the same tag,
+      # and `gh release create` does not refuse one, so check for any
+      # release of the tag (drafts included) first, then publish exactly
+      # the draft just created, by its id.
+      - name: Check that no release exists for the tag
+        run: |
+          ids=$(gh api --paginate "repos/$GH_REPO/releases" \
+            --jq '.[] | select(.tag_name == env.TAG) | .id')
+          if [ -n "$ids" ]; then
+            echo "::error::a release for $TAG already exists (ids: $(printf '%s ' "$ids")), perhaps created by hand. Releases are made only by this workflow: delete it, keep the tag, and re-run this job (docs/RELEASING.md)."
+            exit 1
+          fi
       - name: Create the release
         run: |
           case $VERSION in
@@ -304,8 +314,24 @@ jobs:
           gh release create "$TAG" --draft --verify-tag \
             --title "rambit $VERSION" --generate-notes "$@" \
             dist/rambit-* dist/SHA256SUMS dist/SHA256SUMS.sig
-          gh release edit "$TAG" --draft=false
-          gh release view "$TAG" --json url --jq .url
+          ids=$(gh api --paginate "repos/$GH_REPO/releases" \
+            --jq '.[] | select(.tag_name == env.TAG and .draft) | .id')
+          case $ids in
+            *[!0-9]* | '')
+              echo "::error::expected exactly one draft release for $TAG, found: $(printf '%s ' "$ids")"
+              exit 1
+              ;;
+          esac
+          gh api -X PATCH "repos/$GH_REPO/releases/$ids" -F draft=false --jq .html_url
+      - name: Check the published release
+        run: |
+          got=$(gh release view "$TAG" --json isDraft,assets \
+            --jq '[.isDraft, (.assets | map(.name) | sort | join(" "))] | @tsv')
+          want=$(printf 'false\tSHA256SUMS SHA256SUMS.sig rambit-aarch64-linux rambit-aarch64-macos rambit-x86_64-linux rambit-x86_64-macos')
+          if [ "$got" != "$want" ]; then
+            echo "::error::the published release $TAG is not the one this workflow built: $got"
+            exit 1
+          fi
 
   # Installs what users get, the way they get it.
   smoke:

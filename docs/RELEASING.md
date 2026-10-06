@@ -46,6 +46,10 @@ bumps the version and pushes a tag.
    If the `release` environment has required reviewers, approve the
    deployment when the sign job asks.
 
+   Push only the tag. Do not create the release in GitHub's "Draft a new
+   release" page: the workflow creates it with its assets, and stops at
+   publish if a release for the tag already exists.
+
 The tag starts the workflow. Its jobs:
 
 - **build** checks that the tag is `v<version>` of `build.zig.zon`, that
@@ -80,6 +84,15 @@ as the latest, fix the problem and release the next patch version:
 
 ```sh
 gh release delete v0.2.0 --repo shutx-net/bitnight-rambler
+```
+
+If publish stops because a release for the tag already exists (one
+made by hand, or a draft left by an earlier run), delete that release but
+keep the tag, then re-run the failed jobs. Deleting a release does not
+delete its tag:
+
+```sh
+gh release delete v0.2.0 --repo shutx-net/bitnight-rambler   # no --cleanup-tag
 ```
 
 Never reuse a version number.
