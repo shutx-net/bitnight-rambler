@@ -11,9 +11,18 @@
 #   2. downloads SHA256SUMS and SHA256SUMS.sig of the release and verifies the
 #      ECDSA P-256 signature with the release public key embedded below
 #   3. downloads the binary and checks its SHA-256 against the signed
-#      SHA256SUMS, then checks that it reports the requested version
-#   4. installs it atomically as ~/.local/bin/rambit
-#   Nothing is installed unless every check passes.
+#      SHA256SUMS
+#   4. if gh is installed and logged in, checks the binary's GitHub artifact
+#      attestation (Sigstore provenance from the release workflow)
+#   5. checks that it reports the requested version and installs it
+#      atomically as ~/.local/bin/rambit
+#   Nothing is installed unless every check passes. Your shell startup files
+#   are never edited; if the directory is not on PATH it says what to add.
+#
+# Run it as yourself, not with sudo: under sudo (SUDO_USER or DOAS_USER set)
+# it refuses unless RAMBIT_INSTALL_DIR is set, e.g. to /usr/local/bin for a
+# system-wide install. Plain root (containers, CI) installs to root's
+# ~/.local/bin. It never prompts and never reads stdin.
 #
 # Environment:
 #   RAMBIT_VERSION        release to install, e.g. 1.2.3 or v1.2.3
@@ -26,7 +35,10 @@
 #                         not a tampered release. Ignored when openssl is
 #                         present; a signature that fails is never skipped.
 #   RAMBIT_SKIP_ATTESTATION=1
-#                         skip the optional GitHub attestation check
+#                         skip the optional GitHub attestation check (it runs
+#                         only when gh is installed and logged in; when it
+#                         runs, a failure stops the install). The signature
+#                         and SHA-256 checks still apply.
 #   RAMBIT_DOWNLOAD_BASE  for testing: https:// or file:// URL used instead of
 #                         https://github.com/shutx-net/bitnight-rambler/releases/download
 #                         (requires RAMBIT_VERSION). Signatures are still
@@ -35,8 +47,9 @@
 # Options (pass through sh: curl -fsSL ... | sh -s -- --help):
 #   -h, --help            show this help
 #
-# Requires: curl uname mktemp mkdir cp chmod mv rm grep awk, openssl, and one
-# of sha256sum, shasum or openssl to compute SHA-256.
+# Requires: curl uname id mktemp mkdir cp chmod mv rm grep awk tr, openssl,
+# and one of sha256sum, shasum or openssl to compute SHA-256. Uses gh, and on
+# macOS sysctl and sw_vers, when present.
 #
 # Everything below is a function definition until the last line, so a
 # truncated download runs nothing.
@@ -45,8 +58,7 @@ set -eu
 
 repo=shutx-net/bitnight-rambler
 github=https://github.com/$repo
-# Read by the provenance check.
-# shellcheck disable=SC2034
+# The workflow that must have signed the GitHub artifact attestation.
 signer_workflow=$repo/.github/workflows/release.yml
 
 # Always assigned here, so the environment cannot supply a key.
@@ -92,11 +104,15 @@ Environment:
                                 without openssl only: check the SHA-256 alone
                                 (detects corruption, not tampering)
   RAMBIT_SKIP_ATTESTATION=1     skip the optional GitHub attestation check
+                                (run when gh is installed and logged in)
   RAMBIT_DOWNLOAD_BASE=URL      testing: https:// or file:// release mirror
                                 (needs RAMBIT_VERSION; same key checks)
 
 Options (curl ... | sh -s -- --help):
   -h, --help                    show this help
+
+Run it as yourself, not with sudo. For a system-wide install as root, set
+RAMBIT_INSTALL_DIR=/usr/local/bin. Shell startup files are never edited.
 EOF
 }
 
@@ -128,7 +144,52 @@ detect_platform() {
         aarch64 | arm64) arch=aarch64 ;;
         *) die "unsupported CPU architecture: $uname_m; supported: x86_64 and aarch64 (arm64) on Linux and macOS" ;;
     esac
+    case $os in
+        macos) check_macos ;;
+        linux) check_linux_kernel ;;
+    esac
     asset=rambit-$arch-$os
+}
+
+# small_number STRING: true if STRING is 1 to 4 decimal digits, so that it is
+# safe to compare with [ -lt ].
+small_number() {
+    case $1 in
+        '' | *[!0-9]* | ?????*) return 1 ;;
+    esac
+}
+
+check_macos() {
+    # A Rosetta shell on Apple silicon reports x86_64; the native build fits.
+    if [ "$arch" = x86_64 ] && command -v sysctl >/dev/null 2>&1 &&
+        [ "$(sysctl -n hw.optional.arm64 2>/dev/null </dev/null)" = 1 ]; then
+        arch=aarch64
+        say "this shell runs under Rosetta on Apple silicon; installing the native aarch64 build"
+    fi
+    # The binaries require macOS 13 (their LC_BUILD_VERSION minos is 13.0).
+    if command -v sw_vers >/dev/null 2>&1; then
+        macos_version=$(sw_vers -productVersion 2>/dev/null </dev/null) || macos_version=
+        macos_major=${macos_version%%.*}
+        if small_number "$macos_major" && [ "$macos_major" -lt 13 ]; then
+            die "rambit requires macOS 13 (Ventura) or newer; this is macOS $macos_version"
+        fi
+    fi
+}
+
+check_linux_kernel() {
+    # Zig's default minimum Linux version for the static musl builds is 5.10.
+    kernel=$(uname -r 2>/dev/null) || return 0
+    case $kernel in
+        *.*) ;;
+        *) return 0 ;;
+    esac
+    kernel_major=${kernel%%.*}
+    kernel_minor=${kernel#"$kernel_major".}
+    kernel_minor=${kernel_minor%%[!0-9]*}
+    small_number "$kernel_major" && small_number "$kernel_minor" || return 0
+    if [ "$kernel_major" -lt 5 ] || { [ "$kernel_major" -eq 5 ] && [ "$kernel_minor" -lt 10 ]; }; then
+        warn "warning: rambit is built for Linux 5.10 or newer; it may not run on $kernel"
+    fi
 }
 
 resolve_install_dir() {
@@ -150,6 +211,18 @@ resolve_install_dir() {
         esac
         dir=${dir%/}
     done
+    target=${dir%/}/rambit
+}
+
+# check_root: under sudo or doas, HOME may still be the invoking user's, so
+# the default would leave a root-owned ~/.local/bin in their home.
+check_root() {
+    uid=$(id -u) || die "id -u failed"
+    [ "$uid" = 0 ] || return 0
+    if [ -z "${RAMBIT_INSTALL_DIR:-}" ] && [ -n "${SUDO_USER:-}${DOAS_USER:-}" ]; then
+        die "do not run this with sudo: it installs into your own ~/.local/bin. Run it as yourself, or set RAMBIT_INSTALL_DIR=/usr/local/bin to install system-wide as root."
+    fi
+    say "running as root; installing to $dir"
 }
 
 resolve_base() {
@@ -307,8 +380,50 @@ download_and_verify() {
         die "SHA-256 mismatch for $asset: expected $expected, got $actual. Nothing was installed."
 }
 
+# sanitize: copy stdin to stdout without control characters other than tab
+# and newline, so tool output cannot drive the terminal.
+sanitize() {
+    LC_ALL=C tr -d '\000-\010\013-\037\177'
+}
+
+# verify_attestation FILE: the optional Sigstore provenance check. When it
+# runs and fails, the file is not what the release workflow attested.
+verify_attestation() {
+    if [ "${RAMBIT_SKIP_ATTESTATION:-}" = 1 ]; then
+        provenance_status='skipped (RAMBIT_SKIP_ATTESTATION=1)'
+        return 0
+    fi
+    if ! command -v gh >/dev/null 2>&1 ||
+        ! GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh auth status >/dev/null 2>&1 </dev/null; then
+        provenance_status="not checked (gh not installed or not logged in); to check: gh attestation verify \"$target\" --repo $repo"
+        return 0
+    fi
+    # An older gh without these flags would fail for its own reasons.
+    gh_help=$(GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh attestation verify --help 2>&1 </dev/null) || gh_help=
+    for flag in --signer-workflow --source-ref --deny-self-hosted-runners; do
+        case $gh_help in
+            *"$flag"*) ;;
+            *)
+                provenance_status="not checked (this gh is too old for gh attestation verify $flag; upgrade gh, then: gh attestation verify \"$target\" --repo $repo)"
+                return 0
+                ;;
+        esac
+    done
+    say "checking the GitHub artifact attestation of $asset with gh"
+    if GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh attestation verify "$1" \
+        --repo "$repo" \
+        --signer-workflow "$signer_workflow" \
+        --source-ref "refs/tags/$tag" \
+        --deny-self-hosted-runners \
+        </dev/null >"$tmp_dir/gh.out" 2>&1; then
+        provenance_status='verified (GitHub artifact attestation, Sigstore)'
+        return 0
+    fi
+    sanitize <"$tmp_dir/gh.out" >&2 || :
+    die "gh attestation verify failed for $asset ($tag): it does not match what the release workflow of $repo attested. Nothing was installed. If GitHub's attestation service is unavailable, set RAMBIT_SKIP_ATTESTATION=1 to skip this optional check (the release signature and SHA-256 are still verified)."
+}
+
 install_binary() {
-    target=$dir/rambit
     mkdir -p "$dir" || die "cannot create $dir"
     if [ -d "$target" ]; then
         die "$target is a directory; remove it and run this again"
@@ -327,11 +442,81 @@ install_binary() {
     tmp_file=
 }
 
+# shell_safe STRING: true if STRING can be shown inside a suggested shell
+# command without quoting surprises.
+shell_safe() {
+    case $1 in
+        '' | *[!A-Za-z0-9._/@+=,~-]*) return 1 ;;
+    esac
+}
+
+# print_path_hint: say how to put $dir on PATH (rc files are never edited),
+# or warn when another rambit comes first on PATH.
+print_path_hint() {
+    case ":$PATH:" in
+        *":$dir:"* | *":$dir/:"*)
+            found=$(command -v rambit 2>/dev/null) || found=
+            if [ -n "$found" ] && [ "$found" != "$target" ]; then
+                warn "warning: $found comes first on PATH and shadows the new $target; remove it or put $dir before it on PATH"
+            fi
+            return 0
+            ;;
+    esac
+    found=$(command -v rambit 2>/dev/null) || found=
+    if [ -n "$found" ] && [ "$found" != "$target" ]; then
+        warn "warning: 'rambit' currently runs $found, not the new $target"
+    fi
+    home=${HOME:-}
+    home=${home%/}
+    shown=$dir
+    tilde=$dir
+    if [ -n "$home" ]; then
+        case $dir in
+            "$home"/*)
+                shown=\$HOME/${dir#"$home"/}
+                tilde=\~/${dir#"$home"/}
+                ;;
+        esac
+    fi
+    printf '\n'
+    say "$dir is not on your PATH. To add it:"
+    if ! shell_safe "$tilde"; then
+        say "  add $dir to PATH in your shell's startup file, then open a new terminal"
+        return 0
+    fi
+    case ${SHELL##*/} in
+        zsh) rc=.zshrc ;;
+        bash)
+            if [ "$os" = macos ]; then
+                rc=.bash_profile
+            else
+                rc=.bashrc
+            fi
+            ;;
+        fish)
+            say "  fish_add_path $tilde"
+            return 0
+            ;;
+        *) rc=.profile ;;
+    esac
+    say "  echo 'export PATH=\"$shown:\$PATH\"' >> ~/$rc"
+    say "then open a new terminal, or run: export PATH=\"$shown:\$PATH\""
+}
+
 print_summary() {
-    say "installed rambit ${tag#v} to $target"
+    printf '\n'
+    say "installed rambit ${tag#v}"
+    say "  path: $target"
     say "  signature: $signature_status"
-    say "  sha256:    $actual (matches SHA256SUMS)"
-    say "to uninstall: rm \"$target\""
+    say "  sha256: $actual (matches SHA256SUMS)"
+    say "  provenance: $provenance_status"
+    if [ -z "$verify_signature" ]; then
+        warn "WARNING: the release signature was NOT verified (openssl missing, RAMBIT_INSECURE_SKIP_SIGNATURE=1)"
+    fi
+    print_path_hint
+    printf '\n'
+    say "next steps: rambit cat, rambit --help"
+    say "to uninstall: rm \"$target\" (rambit writes no other files)"
 }
 
 main() {
@@ -351,17 +536,19 @@ main() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
-    for cmd in curl uname mktemp mkdir cp chmod mv rm grep awk; do
+    for cmd in curl uname id mktemp mkdir cp chmod mv rm grep awk tr; do
         need "$cmd"
     done
     check_release_key
     detect_platform
     resolve_install_dir
+    check_root
     resolve_base
     pick_tools
     resolve_version
     make_tmp_dir
     download_and_verify
+    verify_attestation "$tmp_dir/$asset"
     install_binary
     print_summary
 }
