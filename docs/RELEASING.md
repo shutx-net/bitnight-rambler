@@ -35,20 +35,26 @@ bumps the version and pushes a tag.
    build, reproduce and dry-run jobs: the macOS rebuild must equal the
    Linux build byte for byte, and the real x86_64 Linux binary is
    installed through `install.sh` with a throwaway key.
-3. **Tag the commit and push the tag.**
+3. **Create the tag**, in either of two ways:
+   - **On GitHub's release page.** Releases > "Draft a new release":
+     under "Choose a tag" type the new tag, say `v0.2.0`, and create it
+     on `main`; write the title and notes; attach no files; press
+     "Publish release". The release is public at once but empty for a
+     few minutes, until the workflow attaches the binaries, `SHA256SUMS`
+     and its signature; installs fail cleanly until then. Mark a version
+     with a suffix as a pre-release yourself.
+   - **From a terminal**, pushing only the tag. The workflow then
+     creates the release itself, as a draft that is published once all
+     its files are attached, with notes generated from the commits.
 
-   ```sh
-   git fetch origin
-   git tag -s v0.2.0 <the merged commit on main>   # or git tag, unsigned
-   git push origin v0.2.0
-   ```
+     ```sh
+     git fetch origin
+     git tag -s v0.2.0 <the merged commit on main>   # or git tag, unsigned
+     git push origin v0.2.0
+     ```
 
    If the `release` environment has required reviewers, approve the
    deployment when the sign job asks.
-
-   Push only the tag. Do not create the release in GitHub's "Draft a new
-   release" page: the workflow creates it with its assets, and stops at
-   publish if a release for the tag already exists.
 
 The tag starts the workflow. Its jobs:
 
@@ -64,9 +70,10 @@ The tag starts the workflow. Its jobs:
   must be the same key.
 - **attest** creates the build-provenance attestations for the binaries
   and `SHA256SUMS`.
-- **publish** creates the release as a draft with all six files, then
-  publishes it. It fails if a release for the tag already exists; it
-  never overwrites one.
+- **publish** attaches the six files to the release made on the release
+  page, or, if there is none, creates the release as a draft with all
+  six files and then publishes it. It never replaces a file, and checks
+  that the published release has exactly the six files.
 - **smoke** installs the published release with `install.sh` on Linux
   x86_64, Linux arm64 and macOS, and requires the attestation check to
   pass and `rambit --version` to print the version.
@@ -86,9 +93,11 @@ as the latest, fix the problem and release the next patch version:
 gh release delete v0.2.0 --repo shutx-net/bitnight-rambler
 ```
 
-If publish stops because a release for the tag already exists (one
-made by hand, or a draft left by an earlier run), delete that release but
-keep the tag, then re-run the failed jobs. Deleting a release does not
+Publish attaches the files to a release made on the release page only
+if that release is published and has no files. It stops if the release
+is a draft left by an earlier run, already has files, or there is more
+than one release for the tag. Then delete the release in the way but
+keep the tag, and re-run the failed jobs. Deleting a release does not
 delete its tag:
 
 ```sh
