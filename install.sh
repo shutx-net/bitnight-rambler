@@ -64,7 +64,12 @@ signer_workflow=$repo/.github/workflows/release.yml
 # Always assigned here, so the environment cannot supply a key.
 # BEGIN RELEASE PUBLIC KEY
 # Set with tools/release-key.sh embed; see docs/RELEASING.md.
-release_public_key=''
+release_public_key='
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEB5KOti62hF3gDIea3qgvyBCwSQXX
+P5l6aD4FXT1ij0/MgsB9ln3PLbznQaingIuenRz04Fv5he/61KqSK5Uy8A==
+-----END PUBLIC KEY-----
+'
 # END RELEASE PUBLIC KEY
 
 nl='
