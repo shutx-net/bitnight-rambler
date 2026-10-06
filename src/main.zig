@@ -17,7 +17,7 @@ const color = @import("color.zig");
 const play = @import("play.zig");
 const shell = @import("shell.zig");
 
-const version = "0.1.0";
+const version = @import("build_options").version;
 
 const usage =
     \\Usage: rambit <rambler> [options]     let a rambler roam the edges of your terminal
@@ -547,4 +547,8 @@ test parseArgs {
     try std.testing.expectError(error.Usage, parseArgs(&.{ "shell", "--once" }, &w));
     try std.testing.expectError(error.Usage, parseArgs(&.{ "shell", "a", "b" }, &w));
     try std.testing.expectError(error.Usage, parseArgs(&.{ "cat", "--", "x" }, &w));
+}
+
+test "version is a semantic version" {
+    _ = try std.SemanticVersion.parse(version);
 }
