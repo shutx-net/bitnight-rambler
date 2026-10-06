@@ -26,12 +26,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # With no `version`, setup-zig installs exactly the
       # `minimum_zig_version` in build.zig.zon, the one place the version is
       # set. It reads that file from the checkout (and would fall back to the
       # latest Zig without it), so it must come after actions/checkout.
-      - uses: mlugg/setup-zig@v2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
       # Validate first: unlike the tests, it always says what is wrong with
       # a rambler, and where.
       - run: zig build validate
@@ -41,8 +43,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: mlugg/setup-zig@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           use-cache: false # zig fmt does not use the Zig cache
       - run: zig fmt --check build.zig src
@@ -51,9 +55,61 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # Flakes are enabled by default.
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
       # Builds the package, whose check phase runs `zig build test`, and the
       # dev shell, for x86_64-linux.
       - run: nix flake check -L
+
+  # The install and release scripts (install.sh, tools/*.sh). shellcheck
+  # checks them as POSIX sh, since install.sh runs under whatever sh the
+  # user pipes it into. tools/test-install.sh runs install.sh against fake
+  # signed releases in every POSIX shell installed: on macOS that covers
+  # /bin/sh (bash 3.2), dash, zsh and LibreSSL's openssl. release-build
+  # cross-builds the four release binaries as the release workflow does and
+  # installs the real x86_64 Linux one through install.sh, signed with a
+  # throwaway key.
+  shellcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Preinstalled on GitHub's Ubuntu images.
+      - run: shellcheck --version || { sudo apt-get update && sudo apt-get install -y shellcheck; }
+      - run: shellcheck -s sh install.sh tools/*.sh
+
+  install-script:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sh tools/test-install.sh
+
+  release-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+      - run: tools/build-release.sh "$RUNNER_TEMP/dist"
+      - name: Install the build through install.sh
+        run: RAMBIT_TEST_DIST="$RUNNER_TEMP/dist" sh tools/test-install.sh
+      # A warning, not a failure: CI stays green until the maintainer sets
+      # the real key, but a tag would fail in the release workflow.
+      - name: Check the real release key
+        run: |
+          tools/release-key.sh check install.sh ||
+            echo "::warning file=install.sh::install.sh still has the placeholder release key; releases will fail until it is set (docs/RELEASING.md)"

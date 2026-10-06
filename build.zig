@@ -1,8 +1,17 @@
 const std = @import("std");
+const zon = @import("build.zig.zon");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    // build.zig.zon is the one place the version is set: the release
+    // workflow checks the tag against it. -Dversion overrides it.
+    const version = b.option([]const u8, "version", "Version reported by `rambit --version` (default: build.zig.zon's)") orelse zon.version;
+    _ = std.SemanticVersion.parse(version) catch
+        std.process.fatal("-Dversion: '{s}' is not a semantic version", .{version});
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", version);
 
     const exe = b.addExecutable(.{
         .name = "rambit",
@@ -12,6 +21,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "builtin_ramblers", .module = embedRamblers(b) },
+                .{ .name = "build_options", .module = options.createModule() },
             },
         }),
     });

@@ -1,0 +1,349 @@
+# Release: turns a vX.Y.Z tag on main into a GitHub Release.
+#
+# On a pushed tag v*, it
+#   1. build:     checks the tag (it must equal v<version of build.zig.zon>,
+#                 match flake.nix and point at a commit on main), runs the
+#                 tests and builds the four binaries and SHA256SUMS with
+#                 tools/build-release.sh;
+#   2. reproduce: rebuilds them on macOS and requires the same SHA256SUMS,
+#                 so a tampered build host is caught before anything is
+#                 signed;
+#   3. sign:      signs SHA256SUMS with the release key (ECDSA P-256) and
+#                 verifies the signature with the public key in install.sh,
+#                 both the tag's and main's (the one users run);
+#   4. attest:    creates Sigstore build-provenance attestations for the
+#                 binaries and SHA256SUMS (install.sh checks them with
+#                 `gh attestation verify --signer-workflow` this file);
+#   5. publish:   creates the release as a draft with all assets, then
+#                 publishes it; an existing release is never overwritten;
+#   6. smoke:     installs the published release with install.sh on Linux
+#                 x86_64 and arm64 and on macOS, attestation check included.
+#
+# Run by hand (workflow_dispatch), it is a dry run: build, reproduce, then
+# install the real binaries through install.sh with a throwaway key
+# (tools/test-install.sh). It uses no secret and publishes nothing.
+#
+# Needs the GitHub environment `release` (deployment rule: tags v*) holding
+# the secret RAMBIT_SIGNING_KEY, the PEM private key. Only the sign job
+# names that environment, and only its signing step sees the secret. See
+# docs/RELEASING.md.
+#
+# Hardening: no permissions by default, each job asks for the least it
+# needs; actions are pinned to commit SHAs; checkouts keep no credentials;
+# the Zig cache is not used (a release must not build from a cache another
+# run wrote); github context reaches scripts only through env, never through
+# ${{ }} inside a run script.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions: {}
+
+# Never cancel a release half way (a draft without assets, an attestation
+# without a release); a second run for the same ref waits.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the tag check needs origin/main
+          persist-credentials: false
+      # Installs minimum_zig_version from build.zig.zon.
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          use-cache: false
+      - name: Read the version
+        id: version
+        run: |
+          # Same expression as tools/build-release.sh.
+          version=$(sed -n 's/^    \.version = "\([^"]*\)",$/\1/p' build.zig.zon)
+          if ! printf '%s\n' "$version" | grep -Eqx '[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}(-[0-9A-Za-z.-]{1,64})?'; then
+            echo "::error::build.zig.zon has no valid version: '$version'"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "version: $version"
+      - name: Check the tag
+        if: github.event_name == 'push'
+        env:
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" != tag ]; then
+            echo "::error::releases are made from tags, not $GITHUB_REF"
+            exit 1
+          fi
+          # The pattern install.sh accepts.
+          if ! printf '%s\n' "$TAG" | grep -Eqx 'v[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}(-[0-9A-Za-z.-]{1,64})?'; then
+            echo "::error::tag '$TAG' is not vX.Y.Z or vX.Y.Z-PRERELEASE"
+            exit 1
+          fi
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::tag $TAG does not match version $VERSION in build.zig.zon (expected v$VERSION)"
+            exit 1
+          fi
+          if ! grep -Fq "version = \"$VERSION\";" flake.nix; then
+            echo "::error::flake.nix does not have version = \"$VERSION\"; (update it with build.zig.zon)"
+            exit 1
+          fi
+          commit=$(git rev-parse --verify "$GITHUB_SHA^{commit}")
+          if [ "$(git rev-parse HEAD)" != "$commit" ]; then
+            echo "::error::the checkout is not the tagged commit $commit"
+            exit 1
+          fi
+          # Releases come from reviewed main only.
+          if ! git merge-base --is-ancestor "$commit" origin/main; then
+            echo "::error::$TAG ($commit) is not on main; tag a commit of main"
+            exit 1
+          fi
+          echo "tag $TAG: version $VERSION, commit $commit on main"
+      - run: zig build validate
+      - run: zig build test --summary all
+      - run: tools/build-release.sh dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # A different OS must produce the same bytes. This also runs the arm64
+  # macOS binary and checks its code signature (tools/build-release.sh).
+  reproduce:
+    needs: build
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          use-cache: false
+      - run: tools/build-release.sh "$RUNNER_TEMP/rebuild"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: expected
+      - name: Compare with the Linux build
+        run: |
+          if ! cmp expected/SHA256SUMS "$RUNNER_TEMP/rebuild/SHA256SUMS"; then
+            echo "::error::the macOS rebuild differs from the Linux build; nothing is signed or published"
+            echo "Linux (build job):"
+            cat expected/SHA256SUMS
+            echo "macOS (this job):"
+            cat "$RUNNER_TEMP/rebuild/SHA256SUMS"
+            exit 1
+          fi
+          echo "identical SHA256SUMS on Linux and macOS:"
+          cat expected/SHA256SUMS
+
+  # The only job that names the release environment and its secret.
+  sign:
+    needs: [build, reproduce]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # for main's install.sh
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist
+      - name: Check the binaries against SHA256SUMS
+        run: cd dist && sha256sum -c SHA256SUMS
+      # The key goes from the environment through a pipe to openssl: it is
+      # never written to disk, and printf is a shell builtin, so the key is
+      # not in any process's arguments. No `set -x`.
+      - name: Sign SHA256SUMS
+        env:
+          RAMBIT_SIGNING_KEY: ${{ secrets.RAMBIT_SIGNING_KEY }}
+        run: |
+          if [ -z "$RAMBIT_SIGNING_KEY" ]; then
+            echo "::error::the secret RAMBIT_SIGNING_KEY of the release environment is not set (docs/RELEASING.md)"
+            exit 1
+          fi
+          printf '%s\n' "$RAMBIT_SIGNING_KEY" |
+            openssl dgst -sha256 -sign /dev/stdin -out dist/SHA256SUMS.sig dist/SHA256SUMS
+          test -s dist/SHA256SUMS.sig
+      - name: Verify the signature with the keys in install.sh
+        run: |
+          tools/release-key.sh check install.sh
+          tools/release-key.sh extract install.sh > "$RUNNER_TEMP/tag-key.pem"
+          git show origin/main:install.sh |
+            tools/release-key.sh extract - > "$RUNNER_TEMP/main-key.pem"
+          if ! cmp -s "$RUNNER_TEMP/tag-key.pem" "$RUNNER_TEMP/main-key.pem"; then
+            echo "::error::install.sh on main embeds a different release key than install.sh at $GITHUB_REF_NAME"
+            exit 1
+          fi
+          for key in tag-key main-key; do
+            if ! openssl dgst -sha256 -verify "$RUNNER_TEMP/$key.pem" \
+              -signature dist/SHA256SUMS.sig dist/SHA256SUMS; then
+              echo "::error::the signature does not verify with $key.pem: RAMBIT_SIGNING_KEY does not match the key in install.sh"
+              exit 1
+            fi
+          done
+          tools/release-key.sh fingerprint "$RUNNER_TEMP/tag-key.pem"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signature
+          path: dist/SHA256SUMS.sig
+          if-no-files-found: error
+          retention-days: 7
+
+  # Manual runs only: everything up to publishing, with a throwaway key.
+  dry-run:
+    needs: [build, reproduce]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist
+      # Signs the real binaries with a throwaway key and installs the
+      # x86_64 Linux one through install.sh end to end.
+      - name: Install the build through install.sh
+        run: RAMBIT_TEST_DIST="$GITHUB_WORKSPACE/dist" sh tools/test-install.sh
+      - name: Check the real release key
+        run: |
+          tools/release-key.sh check install.sh ||
+            echo "::warning::install.sh still has the placeholder release key: a tag would fail in the sign job (docs/RELEASING.md)"
+
+  attest:
+    needs: [build, reproduce]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # Sigstore signing certificate
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/rambit-*
+            dist/SHA256SUMS
+
+  publish:
+    needs: [build, sign, attest]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signature
+          path: dist
+      - name: Check the assets
+        run: |
+          # In the order of LC_ALL=C ls.
+          expected=$(printf '%s\n' SHA256SUMS SHA256SUMS.sig \
+            rambit-aarch64-linux rambit-aarch64-macos \
+            rambit-x86_64-linux rambit-x86_64-macos)
+          got=$(cd dist && LC_ALL=C ls -A)
+          if [ "$got" != "$expected" ]; then
+            echo "::error::unexpected release assets:"
+            printf '%s\n' "$got"
+            exit 1
+          fi
+          cd dist && sha256sum -c SHA256SUMS
+      # A draft first, so the release only appears with all its assets.
+      # `gh release create` fails if the release exists: nothing is
+      # overwritten.
+      - name: Create the release
+        run: |
+          case $VERSION in
+            *-*) set -- --prerelease ;;
+            *) set -- ;;
+          esac
+          gh release create "$TAG" --draft --verify-tag \
+            --title "rambit $VERSION" --generate-notes "$@" \
+            dist/rambit-* dist/SHA256SUMS dist/SHA256SUMS.sig
+          gh release edit "$TAG" --draft=false
+          gh release view "$TAG" --json url --jq .url
+
+  # Installs what users get, the way they get it.
+  smoke:
+    needs: [build, publish]
+    if: github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      attestations: read
+    env:
+      GH_TOKEN: ${{ github.token }} # so install.sh checks the attestation
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the release with install.sh
+        run: |
+          broken() {
+            echo "::error::$1. The published release $TAG is broken: delete or fix it as docs/RELEASING.md describes."
+            exit 1
+          }
+          log=$RUNNER_TEMP/install.log
+          if ! RAMBIT_VERSION="$TAG" RAMBIT_INSTALL_DIR="$RUNNER_TEMP/bin" sh install.sh > "$log" 2>&1; then
+            cat "$log"
+            broken "install.sh failed"
+          fi
+          cat "$log"
+          grep -q 'provenance: verified' "$log" ||
+            broken "install.sh did not verify the attestation"
+          got=$("$RUNNER_TEMP/bin/rambit" --version) ||
+            broken "rambit --version failed"
+          echo "$got"
+          [ "$got" = "rambit $VERSION" ] ||
+            broken "rambit --version printed '$got', not 'rambit $VERSION'"

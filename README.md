@@ -11,6 +11,125 @@ is data, not code.
 > **Status:** proof of concept. See [ABSTRACT.md](ABSTRACT.md) for the
 > design goals.
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/shutx-net/bitnight-rambler/main/install.sh | sh
+```
+
+This installs one static binary, with every built-in rambler inside it,
+as `~/.local/bin/rambit`. It needs no sudo and never edits your shell's
+startup files; if `~/.local/bin` is not on your `PATH`, it says what to
+add. It runs on Linux x86_64 and aarch64 (any distribution, WSL2
+included; built for kernel 5.10 or newer) and on macOS 13 or newer, on
+Intel and Apple silicon.
+
+Before it installs anything, the installer checks:
+
+1. the signature of the release's `SHA256SUMS` (ECDSA P-256), with the
+   public key written into `install.sh` itself;
+2. the binary's SHA-256 against `SHA256SUMS`;
+3. the binary's GitHub build-provenance attestation (Sigstore), when
+   `gh` is installed and logged in: it must come from this repository's
+   release workflow, built from the release's tag on a GitHub-hosted
+   runner;
+4. that `rambit --version` names the release asked for, so an older
+   signed release cannot pass for a newer one.
+
+If a check fails, nothing is installed. It needs `curl` and `openssl`
+(LibreSSL, as on macOS, works) and stops if either is missing.
+
+Run it as yourself. Under `sudo` or `doas` it refuses, because it would
+leave a root-owned `~/.local/bin` in your home, unless you name the
+directory. To install for every user:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/shutx-net/bitnight-rambler/main/install.sh | sudo env RAMBIT_INSTALL_DIR=/usr/local/bin sh
+```
+
+| Variable | Meaning |
+| -------- | ------- |
+| `RAMBIT_VERSION` | The release to install, e.g. `v0.2.0` or `0.2.0`. Defaults to the latest. |
+| `RAMBIT_INSTALL_DIR` | An absolute directory to install into instead of `~/.local/bin`. |
+| `RAMBIT_SKIP_ATTESTATION=1` | Skip the `gh` attestation check, e.g. when GitHub's attestation service is down. The signature and SHA-256 are still checked. |
+| `RAMBIT_INSECURE_SKIP_SIGNATURE=1` | Only when `openssl` is not installed: install with the SHA-256 check alone. That catches a corrupted download, not a tampered release. With `openssl` installed it is ignored, so a bad signature is never skipped. |
+| `RAMBIT_DOWNLOAD_BASE` | For testing: an `https://` or `file://` URL to download the release from instead of GitHub. Needs `RAMBIT_VERSION`; the signature is still checked with the embedded key. |
+
+To pin a version, set `RAMBIT_VERSION` for `sh`, not for `curl`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/shutx-net/bitnight-rambler/main/install.sh | RAMBIT_VERSION=v0.2.0 sh
+```
+
+To read the script before you run it, download it first:
+
+```sh
+curl -fsSL -o install.sh https://raw.githubusercontent.com/shutx-net/bitnight-rambler/main/install.sh
+less install.sh
+sh install.sh            # sh install.sh --help lists the options
+```
+
+### Verifying by hand
+
+You can make the same checks yourself. Download the binary for your
+machine (`rambit-x86_64-linux`, `rambit-aarch64-linux`,
+`rambit-x86_64-macos` or `rambit-aarch64-macos`), `SHA256SUMS` and
+`SHA256SUMS.sig` from the release, and take the public key out of
+`install.sh`:
+
+```sh
+v=v0.2.0
+base=https://github.com/shutx-net/bitnight-rambler/releases/download/$v
+curl -fsSL -O "$base/rambit-x86_64-linux" -O "$base/SHA256SUMS" -O "$base/SHA256SUMS.sig"
+curl -fsSL https://raw.githubusercontent.com/shutx-net/bitnight-rambler/main/install.sh |
+  sed -n '/^-----BEGIN PUBLIC KEY-----$/,/^-----END PUBLIC KEY-----$/p' > rambit-release.pem
+```
+
+Then check the signature (it prints `Verified OK`), the hash, and, with
+`gh`, the attestation:
+
+```sh
+openssl dgst -sha256 -verify rambit-release.pem -signature SHA256SUMS.sig SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS    # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
+gh attestation verify rambit-x86_64-linux --repo shutx-net/bitnight-rambler \
+  --signer-workflow shutx-net/bitnight-rambler/.github/workflows/release.yml \
+  --source-ref "refs/tags/$v" --deny-self-hosted-runners
+```
+
+If all three pass, install it under the name `rambit`:
+
+```sh
+chmod +x rambit-x86_64-linux
+mkdir -p ~/.local/bin && mv rambit-x86_64-linux ~/.local/bin/rambit
+```
+
+The macOS binaries are not notarized. Files downloaded with `curl` are
+not quarantined, so macOS runs them; one downloaded with a browser is,
+and `xattr -d com.apple.quarantine <file>` lets it run.
+
+### Uninstall
+
+```sh
+rm ~/.local/bin/rambit     # or rambit in your RAMBIT_INSTALL_DIR
+```
+
+rambit writes no other files.
+
+### What you trust
+
+The signature catches release files that were changed after they were
+signed, and a download that went wrong on the way. It does not protect
+you from this repository itself: `install.sh`, with the key in it, comes
+from the same repository as the releases, so whoever can change `main`
+can change the key. In the end you trust GitHub and the people who
+maintain this repository. The private key is kept offline and in a
+GitHub secret that only the signing step of the release workflow can
+read. The attestation does not depend on that key: it ties each binary
+to the workflow run, tag and commit that built it, and the release
+workflow checks that the build is the same, byte for byte, on Linux and
+macOS before anything is signed. [docs/RELEASING.md](docs/RELEASING.md)
+describes how releases are made.
+
 ## Build
 
 Requires [Zig 0.16.0](https://ziglang.org/download/).
@@ -21,7 +140,15 @@ zig build run -- cat               # builds and runs
 zig build test                     # unit tests, including every built-in rambler
 zig build validate                 # rambit validate ramblers
 zig build -Doptimize=ReleaseSmall  # a standalone binary of under 300 KB
+zig build -Dversion=0.2.0-dev      # report another version than build.zig.zon's
+tools/build-release.sh dist        # the four release binaries and SHA256SUMS
 ```
+
+`rambit --version` reports the version in `build.zig.zon` unless
+`-Dversion` sets another; it must be a semantic version.
+`tools/build-release.sh` cross-builds the release binaries from any one
+host, and gives the same bytes on Linux and macOS. How releases are
+signed and published is in [docs/RELEASING.md](docs/RELEASING.md).
 
 Tested on Linux. CI also runs the tests on macOS, the pseudo-terminal
 ones included, but rambit has not been tried there by hand yet. Native
@@ -299,6 +426,9 @@ animation and `motion.jump_height` without a `jump` animation.
 CI runs `zig build validate` and `zig build test` on every pull request
 and every push to `main`, so a pull request shows these problems before
 it is merged.
+CI also lints and tests `install.sh` and the release scripts, and
+cross-builds the release binaries. A separate workflow turns a version
+tag into a signed release.
 
 ## How it works
 
@@ -328,6 +458,7 @@ it is merged.
   that embeds every manifest and sprite with `@embedFile`.
 
 ```text
+install.sh               the installer, for curl | sh
 src/
 ├── main.zig             CLI: play, shell, list, preview, validate
 ├── play.zig             the animation loop
@@ -355,6 +486,9 @@ src/
     ├── width.zig        how many cells a character takes up
     └── width_table.zig  generated by tools/width_table.py
 tools/
+├── build-release.sh     the four release binaries and their SHA256SUMS
+├── release-key.sh       the release signing key: generate, embed, check
+├── test-install.sh      install.sh against fake signed releases
 └── width_table.py       the width table, from Python's unicodedata
 ```
 
