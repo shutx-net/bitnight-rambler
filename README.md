@@ -1,5 +1,7 @@
 # Bitnight Rambler
 
+English | [日本語](README.ja.md)
+
 Tiny pixel-art ramblers that roam the edges of your terminal.
 
 `rambit` is a small animation engine written in Zig with no dependencies
@@ -499,3 +501,7 @@ tools/
 - Combining characters and emoji sequences.
 - More than one rambler at a time.
 - A configurable prefix key.
+
+## License
+
+[MIT](LICENSE), © 2026 shutx.

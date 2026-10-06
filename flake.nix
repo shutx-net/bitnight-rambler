@@ -38,6 +38,7 @@
           meta = {
             description = "Tiny pixel-art ramblers that roam your terminal";
             homepage = "https://github.com/shutx-net/bitnight-rambler";
+            license = lib.licenses.mit;
             mainProgram = "rambit";
             platforms = lib.platforms.unix;
           };
