@@ -95,8 +95,9 @@ check_format() { # name
     esac
     size=$(wc -c < "$f")
     size=$((size + 0))
-    [ "$size" -gt 0 ] && [ "$size" -lt "$max_size" ] ||
+    if [ "$size" -le 0 ] || [ "$size" -ge "$max_size" ]; then
         die "rambit-$1 has an implausible size: $size bytes"
+    fi
     say "rambit-$1: $size bytes, $desc"
 }
 
@@ -139,7 +140,7 @@ write_sums() {
 }
 
 main() {
-    [ $# -eq 1 ] && [ -n "$1" ] || usage
+    if [ $# -ne 1 ] || [ -z "$1" ]; then usage; fi
     ZIG=${ZIG:-zig}
     command -v "$ZIG" >/dev/null 2>&1 || die "no Zig compiler '$ZIG' (set ZIG)"
 

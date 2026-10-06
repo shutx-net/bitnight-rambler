@@ -77,7 +77,7 @@ default_script() {
 # check guarantees no quote can reach a shell string.
 validate_pub() {
     name=${3:-$1}
-    [ -f "$1" ] && [ -r "$1" ] || die "cannot read $name"
+    if [ ! -f "$1" ] || [ ! -r "$1" ]; then die "cannot read $name"; fi
     if grep -q 'PRIVATE KEY' "$1"; then
         die "$name contains a PRIVATE KEY; pass the public key (.pub)"
     fi
@@ -190,7 +190,7 @@ cmd_embed() {
     need_openssl
     pub=$1
     if [ $# -eq 2 ]; then script=$2; else script=$(default_script); fi
-    [ -f "$script" ] && [ -w "$script" ] || die "cannot write $script"
+    if [ ! -f "$script" ] || [ ! -w "$script" ]; then die "cannot write $script"; fi
     validate_pub "$pub" "$tmp_dir/canon.pem"
     check_markers "$script"
     {
@@ -224,7 +224,7 @@ cmd_extract() {
         src=$tmp_dir/stdin
         name='standard input'
     else
-        [ -f "$script" ] && [ -r "$script" ] || die "cannot read $script"
+        if [ ! -f "$script" ] || [ ! -r "$script" ]; then die "cannot read $script"; fi
         src=$script
         name=$script
     fi
@@ -237,7 +237,7 @@ cmd_check() {
     [ $# -le 1 ] || { usage >&2; exit 2; }
     need_openssl
     script=${1:-$(default_script)}
-    [ -f "$script" ] && [ -r "$script" ] || die "cannot read $script"
+    if [ ! -f "$script" ] || [ ! -r "$script" ]; then die "cannot read $script"; fi
     extract_to "$script" "$tmp_dir/key.pem" ||
         die "no release public key embedded in $script (placeholder)"
     validate_pub "$tmp_dir/key.pem" "$tmp_dir/canon.pem" "the key in $script"

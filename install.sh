@@ -308,10 +308,12 @@ resolve_version() {
 }
 
 make_tmp_dir() {
-    tmp_dir=$(mktemp -d 2>/dev/null || mktemp -d -t rambit) ||
+    # An explicit template: macOS's mktemp ignores TMPDIR without one.
+    tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/rambit.XXXXXX" 2>/dev/null) ||
         die "cannot create a temporary directory"
-    [ -n "$tmp_dir" ] && [ -d "$tmp_dir" ] ||
+    if [ -z "$tmp_dir" ] || [ ! -d "$tmp_dir" ]; then
         die "cannot create a temporary directory"
+    fi
 }
 
 # fetch URL OUT

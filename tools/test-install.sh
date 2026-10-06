@@ -487,6 +487,8 @@ truncation() {
         fi
         : >"$W/curl.log"
         st=0
+        # A pipe on purpose, as in curl | sh: the shell cannot seek in it.
+        # shellcheck disable=SC2002
         (cd "$W/cwd" && cat "$W/cut.sh" | env -i "$@" "$tsh") >"$W/out" 2>"$W/err" || st=$?
         why=
         if [ "$k" = "$n" ] && { [ "$pre" = main ] || [ "$pre" = 'main ' ]; }; then
