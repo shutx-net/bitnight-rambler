@@ -484,7 +484,9 @@ print_path_hint() {
         say "  add $dir to PATH in your shell's startup file, then open a new terminal"
         return 0
     fi
-    case ${SHELL##*/} in
+    # SHELL is unset under env -i, in cron jobs and in some containers.
+    login_shell=${SHELL:-}
+    case ${login_shell##*/} in
         zsh) rc=.zshrc ;;
         bash)
             if [ "$os" = macos ]; then
