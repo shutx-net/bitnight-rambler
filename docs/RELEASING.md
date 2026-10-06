@@ -17,128 +17,10 @@ stores a Sigstore build-provenance attestation for each binary and for
 in.
 
 The [Release workflow](../.github/workflows/release.yml) does all of the
-building, signing and publishing. A maintainer sets up the key once, then
-bumps the version and pushes a tag for each release.
-
-## First release checklist
-
-Everything below is described in detail in the following sections.
-
-1. [ ] Generate the release key on a trusted machine, outside any
-   repository.
-2. [ ] Create the `release` environment (tag rule `v*`) and store the
-   private key in its secret `RAMBIT_SIGNING_KEY`.
-3. [ ] Embed the public key in `install.sh`, check it, and merge it to
-   `main`.
-4. [ ] Back up the private key offline and delete the plain copy.
-5. [ ] Recommended: a tag ruleset for `v*`, immutable releases, and
-   reviews required on `main`.
-6. [ ] Set the version in `build.zig.zon` and `flake.nix`, merge, and do
-   a dry run of the Release workflow on `main`.
-7. [ ] Tag the merged commit and push the tag; approve the `release`
-   environment if it asks.
-8. [ ] Once the smoke job has passed, install on a clean machine with
-   the README's one-liner and check:
-
-   ```sh
-   tools/release-key.sh check install.sh   # release key OK, fingerprint sha256:...
-   gh release view vX.Y.Z --repo shutx-net/bitnight-rambler   # four binaries, SHA256SUMS, SHA256SUMS.sig
-   rambit --version
-   gh attestation verify ~/.local/bin/rambit --repo shutx-net/bitnight-rambler \
-     --signer-workflow shutx-net/bitnight-rambler/.github/workflows/release.yml
-   ```
-
-## One-time setup
-
-### The key
-
-Generate the key pair on a machine you trust, in a directory outside any
-git work tree (`tools/release-key.sh` refuses one inside). It needs
-`openssl`; LibreSSL works too.
-
-```sh
-tools/release-key.sh generate ~/rambit-release-key
-```
-
-This writes `~/rambit-release-key/rambit-release.key`, the private key
-(mode 600), and `rambit-release.pub`, and prints the public key, its
-fingerprint and the next steps. Never commit, paste or print the private
-key: it belongs only in the secret below and in an offline backup.
-
-### The release environment
-
-In the repository's Settings > Environments, create an environment named
-`release`. Under "Deployment branches and tags", choose "Selected
-branches and tags" and add a tag rule with the pattern `v*`, so that only
-a version tag can use it. Optionally add required reviewers: the sign job
-then waits until one of them approves.
-
-Store the private key as the environment's secret:
-
-```sh
-gh secret set RAMBIT_SIGNING_KEY --env release --repo shutx-net/bitnight-rambler < ~/rambit-release-key/rambit-release.key
-```
-
-The secret must be the unencrypted PEM file as `generate` wrote it. Only
-the sign job names the `release` environment, and only its signing step
-sees the secret; it goes to `openssl` through a pipe and never touches
-the runner's disk.
-
-### Embedding the public key
-
-```sh
-tools/release-key.sh embed ~/rambit-release-key/rambit-release.pub
-tools/release-key.sh check install.sh
-sh tools/test-install.sh
-```
-
-`embed` writes the key between the `# BEGIN RELEASE PUBLIC KEY` and
-`# END RELEASE PUBLIC KEY` lines of `install.sh` and prints its
-fingerprint, which must match the one `generate` printed. With a real
-key in place, `tools/test-install.sh` also checks that the repository's
-key rejects its own throwaway test signature. Commit only `install.sh`
-(for example `feat(install): embed the release public key`), open a pull
-request and merge it.
-
-### Backing up the private key
-
-Keep the private key offline, in a password manager or an encrypted
-backup, then delete the plain copy:
-
-```sh
-openssl ec -aes256 -in ~/rambit-release-key/rambit-release.key -out rambit-release.key.enc   # asks for a passphrase
-rm ~/rambit-release-key/rambit-release.key
-```
-
-To get the plain key back, for a rotation or to re-sign a release:
-
-```sh
-openssl ec -in rambit-release.key.enc -out rambit-release.key
-```
-
-The public key, `rambit-release.pub`, is not secret.
-
-### Repository settings
-
-Recommended, under Settings:
-
-- **Rules > Rulesets:** a tag ruleset for `v*` that restricts creation to
-  maintainers and blocks updates and deletions, so a release tag cannot
-  be moved.
-- **General > Releases:** enable release immutability, so the files of a
-  published release cannot be replaced. The workflow uploads every file
-  to a draft before publishing it, which immutable releases allow.
-- **Rules or Branches:** require a reviewed pull request for `main`.
-  Releases are only made from commits on `main`, and `main` holds the
-  `install.sh` that users run.
-
-### While install.sh has no key
-
-Until a key is embedded, `install.sh` stops at once with "this
-install.sh has no release key yet" and installs nothing. CI's
-release-build job and the Release workflow's dry run only warn about it,
-so CI stays green, but the sign job of a tagged release fails at
-`tools/release-key.sh check install.sh`, before anything is published.
+building, signing and publishing. The private key is the secret
+`RAMBIT_SIGNING_KEY` of the `release` environment (tag rule `v*`); only
+the workflow's signing step can read it. For each release a maintainer
+bumps the version and pushes a tag.
 
 ## Cutting a release
 
@@ -213,13 +95,24 @@ run.
 
 ## Rotating the key
 
-1. Generate a new key pair in a new directory:
-   `tools/release-key.sh generate ~/rambit-release-key-2`.
+1. On a trusted machine, outside any git work tree, generate a new key
+   pair: `tools/release-key.sh generate ~/rambit-release-key-2`. It
+   writes the private key `rambit-release.key` (mode 600) and
+   `rambit-release.pub`.
 2. Replace the secret with the new private key:
    `gh secret set RAMBIT_SIGNING_KEY --env release --repo shutx-net/bitnight-rambler < ~/rambit-release-key-2/rambit-release.key`.
-3. Embed the new public key, check it and merge it to `main`, as in
-   [Embedding the public key](#embedding-the-public-key).
-4. Back up the new private key and delete the plain copy, as before.
+3. Embed the new public key and check it, then merge `install.sh` to
+   `main`:
+
+   ```sh
+   tools/release-key.sh embed ~/rambit-release-key-2/rambit-release.pub
+   tools/release-key.sh check install.sh
+   sh tools/test-install.sh
+   ```
+
+4. Keep the private key only in an offline, encrypted backup
+   (`openssl ec -aes256 -in rambit-release.key -out rambit-release.key.enc`)
+   and delete the plain copy.
 
 Do all of this before the next release. Between steps 2 and 3 a tagged
 release fails in the sign job, since the secret and `install.sh` no

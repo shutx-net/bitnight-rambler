@@ -13,10 +13,6 @@ is data, not code.
 
 ## Install
 
-> **Not yet:** no signed release has been published. Until the first one
-> is, the installer stops without installing anything; build from source
-> instead (see [Build](#build)).
-
 ```sh
 curl -fsSL https://raw.githubusercontent.com/shutx-net/bitnight-rambler/main/install.sh | sh
 ```
